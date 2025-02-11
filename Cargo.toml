@@ -1,0 +1,17 @@
+[package]
+name = "ld-so-impl"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytemuck = { version = "1.21.0", features = ["latest_stable_rust", "derive"] }
+fake-enum = "0.1.4"
+
+[lib]
+crate-type = ["rlib"]
+
+
+[profile.dev]
+opt-level = 3            # we need to inline like crazy
+debug-assertions = false
+overflow-checks = false
