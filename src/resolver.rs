@@ -11,6 +11,7 @@ use crate::{
     elf::{
         DynEntryType, ElfClass, ElfDyn, ElfGnuHashHeader, ElfRela, ElfRelocation, ElfSym, ElfSymbol,
     },
+    helpers::cstr_from_ptr,
     safe_addr_of,
 };
 
@@ -187,7 +188,7 @@ impl Resolver {
 
         'a: for ent in dyn_ent {
             if ent.d_tag == DynEntryType::DT_NEEDED {
-                let needed: &CStr = unsafe { CStr::from_ptr(entry.strtab.add(ent.d_val as usize)) };
+                let needed: &CStr = unsafe { cstr_from_ptr(entry.strtab.add(ent.d_val as usize)) };
                 let st = needed.to_bytes();
 
                 for ent in self.live_entries() {
@@ -339,7 +340,7 @@ pub fn get_sym_name(ent: &DynEntry, n: usize) -> &CStr {
 
     let name = unsafe { str_tab.add(idx) };
 
-    unsafe { CStr::from_ptr(name) }
+    unsafe { cstr_from_ptr(name) }
 }
 
 #[cfg_attr(target_arch = "x86_64", path = "resolver/x86_64.rs")]

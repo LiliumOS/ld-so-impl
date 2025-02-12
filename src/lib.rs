@@ -6,6 +6,8 @@ mod debug;
 pub mod elf;
 pub mod traits;
 
+pub mod helpers;
+
 pub mod resolver;
 
 pub mod arch;
