@@ -13,7 +13,9 @@ unsafe extern "C" {
 }
 
 global_asm! {
+    ".hidden {sym_lookup}",
     ".hidden _plt_resolve_sym_impl",
+    ".global _plt_resolve_sym_impl",
     "_plt_resolve_sym_impl:",
     "pop r11",
     "push rdi",
