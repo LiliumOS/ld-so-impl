@@ -1025,3 +1025,8 @@ pub struct ElfGnuHashHeader {
     pub bloom_size: u32,
     pub bloom_shift: u32,
 }
+
+pub const EM_HOST: consts::ElfMachine = cfg_match::cfg_match! {
+    target_arch = "x86" => consts::EM_386,
+    target_arch = "x86_64" => consts::EM_X86_64,
+};

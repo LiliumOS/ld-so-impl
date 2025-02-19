@@ -1,5 +1,6 @@
 use core::ffi::{CStr, c_char};
 
+#[unsafe(export_name = "strlen")]
 pub unsafe extern "C" fn strlen_impl(p: *const c_char) -> usize {
     let mut len = 0;
     while unsafe { p.add(len).read() } != 0 {
@@ -8,7 +9,7 @@ pub unsafe extern "C" fn strlen_impl(p: *const c_char) -> usize {
     len
 }
 
-#[inline]
+#[inline(always)]
 pub unsafe fn cstr_from_ptr<'a>(p: *const c_char) -> &'a CStr {
     let len = unsafe { crate::safe_call!(unsafe fn strlen_impl { p }) };
 
@@ -27,5 +28,4 @@ macro_rules! hidden_syms{
 
 hidden_syms! {
     strlen_impl,
-    cstr_from_ptr,
 }

@@ -8,6 +8,7 @@ use core::{
 use bytemuck::Zeroable;
 
 use crate::{
+    arch::crash_unrecoverably,
     elf::{
         DynEntryType, ElfClass, ElfDyn, ElfGnuHashHeader, ElfRela, ElfRelocation, ElfSym, ElfSymbol,
     },
@@ -39,7 +40,7 @@ struct ResolverHead {
     entry_count: AtomicUsize,
     has_entered_resolve_fn: AtomicUsize,
     cb_resolve_err: Option<fn(&CStr) -> !>,
-    cb_resolve_needed: Option<fn(&CStr, &Resolver, *mut c_void)>,
+    cb_resolve_needed: Option<fn(&CStr, &'static Resolver, *mut c_void)>,
 }
 
 unsafe impl Zeroable for ResolverHead {}
@@ -78,7 +79,10 @@ impl Resolver {
     }
 
     #[inline(always)]
-    pub fn set_resolve_needed(&mut self, cb_resolve_needed: fn(&CStr, &Resolver, *mut c_void)) {
+    pub fn set_resolve_needed(
+        &mut self,
+        cb_resolve_needed: fn(&CStr, &'static Resolver, *mut c_void),
+    ) {
         self.head.cb_resolve_needed = Some(cb_resolve_needed);
     }
 
@@ -235,7 +239,7 @@ impl Resolver {
                         slot.write(val.offset(addend));
                     }
                 }
-                _ => todo!(),
+                _ => crash_unrecoverably(),
             }
         }
         entry
