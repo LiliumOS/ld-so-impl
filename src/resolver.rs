@@ -326,6 +326,20 @@ impl Resolver {
                         slot.write(val.offset(addend));
                     }
                 }
+                arch::RELATIVE_RELOC => {
+                    let sym = rela.symbol() as usize;
+
+                    let val = base;
+
+                    let addend = rela.addend() as isize;
+
+                    let offset = rela.at_offset() as usize;
+
+                    let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
+                    unsafe {
+                        slot.write(val.offset(addend));
+                    }
+                }
                 _ => crash_unrecoverably(),
             }
         }

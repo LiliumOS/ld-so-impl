@@ -23,6 +23,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cfg-match"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8100e46ff92eb85bf6dc2930c73f2a4f7176393c84a9446b3d501e1b354e7b34"
+
+[[package]]
 name = "fake-enum"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -33,6 +39,7 @@ name = "ld-so-impl"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "cfg-match",
  "fake-enum",
 ]
 
