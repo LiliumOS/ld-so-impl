@@ -16,3 +16,6 @@ crate-type = ["rlib"]
 opt-level = 3            # we need to inline like crazy
 debug-assertions = false
 overflow-checks = false
+
+[features]
+alloc = []

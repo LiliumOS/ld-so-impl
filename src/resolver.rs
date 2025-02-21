@@ -2,6 +2,7 @@ use core::{
     cell::SyncUnsafeCell,
     ffi::{CStr, c_char, c_void},
     mem::offset_of,
+    ptr::NonNull,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -10,9 +11,12 @@ use bytemuck::Zeroable;
 use crate::{
     arch::crash_unrecoverably,
     elf::{
-        DynEntryType, ElfClass, ElfDyn, ElfGnuHashHeader, ElfRela, ElfRelocation, ElfSym, ElfSymbol,
+        DynEntryType, ElfClass, ElfDyn, ElfGnuHashHeader, ElfHeader, ElfPhdr, ElfRela,
+        ElfRelocation, ElfSym, ElfSymbol,
+        consts::{PT_DYNAMIC, PT_LOAD, ProgramType},
     },
     helpers::cstr_from_ptr,
+    loader::{Error, LoaderImpl},
     safe_addr_of,
 };
 
@@ -23,7 +27,7 @@ pub struct DynEntry {
     got: *mut *const c_void,
     base: *mut c_void,
     syms: *const ElfSym,
-    name: Option<&'static &'static str>,
+    name: Option<NonNull<c_char>>,
     strtab: *const c_char,
     hash: *const u32,
     plt_rela: *const ElfRela,
@@ -40,26 +44,37 @@ struct ResolverHead {
     entry_count: AtomicUsize,
     has_entered_resolve_fn: AtomicUsize,
     cb_resolve_err: Option<fn(&CStr) -> !>,
-    cb_resolve_needed: Option<fn(&CStr, &'static Resolver, *mut c_void)>,
+    loader: Option<&'static (dyn LoaderImpl + Sync)>,
+    delegate: Option<&'static Resolver>,
 }
 
-unsafe impl Zeroable for ResolverHead {}
-
-const RESOLVER_ENTRY_COUNT: usize =
+const STATIC_RESOLVER_ENTRY_COUNT: usize =
     (4096 - core::mem::size_of::<ResolverHead>()) / core::mem::size_of::<DynEntry>();
 
 #[repr(C, align(4096))]
 pub struct Resolver {
     head: ResolverHead,
-    entries: SyncUnsafeCell<[DynEntry; RESOLVER_ENTRY_COUNT]>,
+    static_entries: SyncUnsafeCell<[DynEntry; STATIC_RESOLVER_ENTRY_COUNT]>,
 }
-
-unsafe impl Zeroable for Resolver {}
 
 pub struct ResolveError {}
 
 impl Resolver {
-    pub const ZERO: Self = bytemuck::zeroed();
+    pub const ZERO: Self = Self {
+        head: ResolverHead {
+            entry_count: AtomicUsize::new(0),
+            has_entered_resolve_fn: AtomicUsize::new(0),
+            cb_resolve_err: None,
+            loader: None,
+            delegate: None,
+        },
+        static_entries: SyncUnsafeCell::new(bytemuck::zeroed()),
+    };
+
+    #[inline(always)]
+    pub fn delegate(&mut self, other: &'static Resolver) {
+        self.head.delegate = Some(other);
+    }
 
     #[inline(always)]
     pub fn resolve_error(&self, sym: &CStr) -> ! {
@@ -79,20 +94,99 @@ impl Resolver {
     }
 
     #[inline(always)]
-    pub fn set_resolve_needed(
-        &mut self,
-        cb_resolve_needed: fn(&CStr, &'static Resolver, *mut c_void),
-    ) {
-        self.head.cb_resolve_needed = Some(cb_resolve_needed);
+    pub fn set_loader_backend(&mut self, loader: &'static (dyn LoaderImpl + Sync)) {
+        self.head.loader = Some(loader);
     }
 
     #[inline(always)]
     pub fn live_entries(&self) -> &[DynEntry] {
         let mut count = self.head.entry_count.load(Ordering::Acquire);
         count = (count & 0xFFFF) - (count >> 16);
-        let entries = self.entries.get().as_mut_ptr();
+        let entries = self.static_entries.get().as_mut_ptr();
 
         unsafe { core::slice::from_raw_parts(entries, count) }
+    }
+
+    #[inline]
+    unsafe fn load_impl(
+        &'static self,
+        soname: &'static CStr,
+        udata: *mut c_void,
+        loader: &'static dyn LoaderImpl,
+    ) -> Result<(), Error> {
+        let fd = unsafe { loader.find(soname, udata)? };
+
+        let mut ehdr: ElfHeader = ElfHeader::zeroed();
+
+        loader.read_offset(0, fd, bytemuck::bytes_of_mut(&mut ehdr))?;
+
+        let ph_off = ehdr.e_phoff;
+        let ph_num = ehdr.e_phnum as usize;
+
+        let mut phdrs: [ElfPhdr; 32] = bytemuck::zeroed();
+
+        loader.read_offset(ph_off, fd, bytemuck::cast_slice_mut(&mut phdrs[..ph_num]))?;
+
+        let mut load_segments = &phdrs[..];
+
+        for i in 0..phdrs.len() {
+            if phdrs[i].p_type == PT_LOAD {
+                load_segments = &phdrs[i..];
+                break;
+            }
+        }
+
+        for i in (0..load_segments.len()).rev() {
+            if load_segments[i].p_type == PT_LOAD {
+                load_segments = &load_segments[..=i];
+                break;
+            }
+        }
+
+        let dyn_phdr = phdrs
+            .iter()
+            .find(|phdr| phdr.p_type == PT_DYNAMIC)
+            .ok_or(Error::Fatal)?;
+
+        let highest_pma = load_segments
+            .iter()
+            .map(|v| v.p_paddr + v.p_memsz)
+            .max()
+            .unwrap_or(0);
+
+        let addr = unsafe { loader.alloc_base_addr(udata, highest_pma)? };
+
+        let addr = unsafe { loader.map_phdrs(load_segments, fd, addr)? };
+
+        let dyn_addr = addr
+            .wrapping_add(dyn_phdr.p_paddr as usize)
+            .cast::<ElfDyn>()
+            .cast_const();
+
+        let mut end = dyn_addr;
+
+        while unsafe { (*end).d_tag } != DynEntryType::DT_NULL {
+            unsafe { end = end.add(1) }
+        }
+
+        let dyn_seg = unsafe { core::slice::from_ptr_range(dyn_addr..end) };
+
+        unsafe {
+            self.resolve_object(addr, dyn_seg, soname, udata);
+        }
+
+        Ok(())
+    }
+
+    pub unsafe fn load(&'static self, name: &'static CStr, udata: *mut c_void) {
+        let Some(loader) = self.head.loader else {
+            self.resolve_error(name)
+        };
+
+        match unsafe { self.load_impl(name, udata, loader) } {
+            Ok(()) | Err(Error::AssumePresent) => {}
+            Err(_) => self.resolve_error(name),
+        }
     }
 
     /// Safety:
@@ -106,14 +200,14 @@ impl Resolver {
         &'static self,
         base: *mut c_void,
         dyn_ent: &[ElfDyn],
-        name: &'static &'static str,
+        name: &'static CStr,
         udata: *mut c_void,
     ) -> &'static DynEntry {
         let mut entry = DynEntry {
             got: core::ptr::null_mut(),
             base,
             syms: core::ptr::null(),
-            name: Some(name),
+            name: Some(unsafe { NonNull::new_unchecked(name.as_ptr().cast_mut()) }),
             strtab: core::ptr::null(),
             hash: core::ptr::null(),
             plt_rela: core::ptr::null(),
@@ -166,10 +260,10 @@ impl Resolver {
             .entry_count
             .fetch_add(0x00010001, Ordering::Relaxed)
             & 0xFFFF;
-        if i > RESOLVER_ENTRY_COUNT {
+        if i > STATIC_RESOLVER_ENTRY_COUNT {
             panic!("Max Open Objects reached {i}");
         }
-        let ptr = unsafe { self.entries.get().cast::<DynEntry>().add(i) };
+        let ptr = unsafe { self.static_entries.get().cast::<DynEntry>().add(i) };
 
         if !entry.got.is_null() {
             unsafe { entry.got.add(1).write(ptr.cast()) }
@@ -190,23 +284,16 @@ impl Resolver {
             .entry_count
             .fetch_sub(0x00010000, Ordering::Release);
 
-        'a: for ent in dyn_ent {
+        for ent in dyn_ent {
             if ent.d_tag == DynEntryType::DT_NEEDED {
                 let needed: &CStr = unsafe { cstr_from_ptr(entry.strtab.add(ent.d_val as usize)) };
-                let st = needed.to_bytes();
 
-                for ent in self.live_entries() {
-                    if let Some(&name) = ent.name {
-                        if name.as_bytes() == st {
-                            continue 'a;
-                        }
-                    }
+                if self.is_loaded(needed) {
+                    continue;
                 }
 
-                if let Some(cb) = self.head.cb_resolve_needed {
-                    cb(needed, self, udata)
-                } else {
-                    self.resolve_error(needed)
+                unsafe {
+                    self.load(needed, udata);
                 }
             }
         }
@@ -243,6 +330,22 @@ impl Resolver {
             }
         }
         entry
+    }
+
+    #[inline]
+    pub fn is_loaded(&self, needed: &CStr) -> bool {
+        for ent in self.live_entries() {
+            if let Some(name) = ent.name {
+                if unsafe { cstr_from_ptr(name.as_ptr()) } == needed {
+                    return true;
+                }
+            }
+        }
+
+        match self.head.delegate {
+            Some(delegate) => delegate.is_loaded(needed),
+            None => false,
+        }
     }
 
     #[inline(always)]
@@ -326,7 +429,11 @@ impl Resolver {
             }
         }
 
-        core::ptr::null_mut()
+        if let Some(delegate) = self.head.delegate {
+            delegate.find_sym(name)
+        } else {
+            core::ptr::null_mut()
+        }
     }
 }
 

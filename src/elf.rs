@@ -60,19 +60,19 @@ impl<'a, H> Default for PltEntryDesc<'a, H> {
     }
 }
 
-pub type ElfByte<E> = <E as ElfClass>::Byte;
-pub type ElfHalf<E> = <E as ElfClass>::Half;
-pub type ElfWord<E> = <E as ElfClass>::Word;
-pub type ElfSword<E> = <E as ElfClass>::Sword;
-pub type ElfXword<E> = <E as ElfClass>::Xword;
-pub type ElfSxword<E> = <E as ElfClass>::Sxword;
-pub type ElfAddr<E> = <E as ElfClass>::Addr;
-pub type ElfOffset<E> = <E as ElfClass>::Offset;
+pub type ElfByte<E = ElfHost> = <E as ElfClass>::Byte;
+pub type ElfHalf<E = ElfHost> = <E as ElfClass>::Half;
+pub type ElfWord<E = ElfHost> = <E as ElfClass>::Word;
+pub type ElfSword<E = ElfHost> = <E as ElfClass>::Sword;
+pub type ElfXword<E = ElfHost> = <E as ElfClass>::Xword;
+pub type ElfSxword<E = ElfHost> = <E as ElfClass>::Sxword;
+pub type ElfAddr<E = ElfHost> = <E as ElfClass>::Addr;
+pub type ElfOffset<E = ElfHost> = <E as ElfClass>::Offset;
 pub type ElfSection<E = ElfHost> = <E as ElfClass>::Section;
 pub type ElfPhdr<E = ElfHost> = <E as ElfClass>::ProgramHeader;
-pub type ElfVersym<E> = <E as ElfClass>::Versym;
-pub type Symbol<E> = <E as ElfClass>::Symbol;
-pub type ElfSize<E> = <E as ElfClass>::Size;
+pub type ElfVersym<E = ElfHost> = <E as ElfClass>::Versym;
+pub type Symbol<E = ElfHost> = <E as ElfClass>::Symbol;
+pub type ElfSize<E = ElfHost> = <E as ElfClass>::Size;
 
 pub trait ElfSymbol: Sealed {
     type Class: ElfClass;
@@ -725,6 +725,9 @@ pub mod consts {
             PT_PHDR = 6,
         }
     }
+    pub const PF_X: u32 = 1;
+    pub const PF_W: u32 = 2;
+    pub const PF_R: u32 = 4;
 
     fake_enum::fake_enum! {
         #[repr(pub u32)]
@@ -841,7 +844,7 @@ pub mod consts {
 
 #[derive(Copy, Clone, Debug)]
 #[repr(C)]
-pub struct ElfHeader<E: ElfClass> {
+pub struct ElfHeader<E: ElfClass = ElfHost> {
     pub e_ident: consts::ElfIdent,
     pub e_type: consts::ElfType,
     pub e_machine: consts::ElfMachine,
