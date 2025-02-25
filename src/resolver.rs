@@ -43,7 +43,7 @@ unsafe impl Sync for DynEntry {}
 struct ResolverHead {
     entry_count: AtomicUsize,
     has_entered_resolve_fn: AtomicUsize,
-    cb_resolve_err: Option<fn(&CStr) -> !>,
+    cb_resolve_err: Option<fn(&CStr, Error) -> !>,
     loader: Option<&'static (dyn LoaderImpl + Sync)>,
     delegate: Option<&'static Resolver>,
 }
@@ -77,19 +77,19 @@ impl Resolver {
     }
 
     #[inline(always)]
-    pub fn resolve_error(&self, sym: &CStr) -> ! {
+    pub fn resolve_error(&self, sym: &CStr, e: Error) -> ! {
         match self.head.cb_resolve_err {
             Some(cb_resolve_error)
                 if self.head.has_entered_resolve_fn.swap(1, Ordering::Relaxed) == 0 =>
             {
-                cb_resolve_error(sym)
+                cb_resolve_error(sym, e)
             }
             _ => crate::arch::crash_unrecoverably(),
         }
     }
 
     #[inline(always)]
-    pub fn set_resolve_error_callback(&mut self, cb_resolve_err: fn(&CStr) -> !) {
+    pub fn set_resolve_error_callback(&mut self, cb_resolve_err: fn(&CStr, Error) -> !) {
         self.head.cb_resolve_err = Some(cb_resolve_err);
     }
 
@@ -107,15 +107,29 @@ impl Resolver {
         unsafe { core::slice::from_raw_parts(entries, count) }
     }
 
+    pub unsafe fn load_from_handle(
+        &'static self,
+        soname: &'static CStr,
+        udata: *mut c_void,
+        fhdl: *mut c_void,
+    ) {
+        let Some(loader) = self.head.loader else {
+            self.resolve_error(soname, Error::Fatal)
+        };
+        match unsafe { self.load_impl(soname, udata, loader, fhdl) } {
+            Ok(()) => {}
+            Err(e) => self.resolve_error(soname, e),
+        }
+    }
+
     #[inline]
     unsafe fn load_impl(
         &'static self,
         soname: &'static CStr,
         udata: *mut c_void,
         loader: &'static dyn LoaderImpl,
+        fd: *mut c_void,
     ) -> Result<(), Error> {
-        let fd = unsafe { loader.find(soname, udata)? };
-
         let mut ehdr: ElfHeader = ElfHeader::zeroed();
 
         loader.read_offset(0, fd, bytemuck::bytes_of_mut(&mut ehdr))?;
@@ -146,7 +160,7 @@ impl Resolver {
         let dyn_phdr = phdrs
             .iter()
             .find(|phdr| phdr.p_type == PT_DYNAMIC)
-            .ok_or(Error::Fatal)?;
+            .ok_or(Error::MalformedObject)?;
 
         let highest_pma = load_segments
             .iter()
@@ -180,12 +194,14 @@ impl Resolver {
 
     pub unsafe fn load(&'static self, name: &'static CStr, udata: *mut c_void) {
         let Some(loader) = self.head.loader else {
-            self.resolve_error(name)
+            self.resolve_error(name, Error::Fatal)
         };
 
-        match unsafe { self.load_impl(name, udata, loader) } {
+        match unsafe { loader.find(name, udata) }
+            .and_then(|fhdl| unsafe { self.load_impl(name, udata, loader, fhdl) })
+        {
             Ok(()) | Err(Error::AssumePresent) => {}
-            Err(_) => self.resolve_error(name),
+            Err(e) => self.resolve_error(name, e),
         }
     }
 
@@ -314,7 +330,7 @@ impl Resolver {
                     let val = self.find_sym(name);
 
                     if val.is_null() {
-                        self.resolve_error(name)
+                        self.resolve_error(name, Error::SymbolNotFound)
                     }
 
                     let addend = rela.addend() as isize;

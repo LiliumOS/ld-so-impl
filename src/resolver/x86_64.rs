@@ -58,7 +58,7 @@ pub unsafe extern "sysv64" fn plt_resolve_sym(reloc: &ElfRela, dyn_ent: &DynEntr
     let addr = resolver.find_sym(name);
 
     if addr.is_null() {
-        resolver.resolve_error(name);
+        resolver.resolve_error(name, crate::loader::Error::SymbolNotFound);
     }
 
     let addr = unsafe { addr.offset(addend as isize) };

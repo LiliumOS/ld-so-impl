@@ -8,8 +8,14 @@ use crate::{
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum Error {
-    Fatal,
     AssumePresent,
+    SymbolNotFound,
+    ObjectNotFound,
+    MalformedObject,
+    ReadError,
+    LoadError,
+    AllocError,
+    Fatal,
 }
 
 pub trait LoaderImpl {
