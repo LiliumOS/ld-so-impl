@@ -37,6 +37,10 @@ pub trait LoaderImpl {
         map_desc: *mut c_void,
         sl: &mut [u8],
     ) -> Result<(), Error>;
+
+    fn write_str(&self, st: &str) -> core::fmt::Result {
+        Ok(())
+    }
 }
 
 impl<P: core::ops::Deref> LoaderImpl for P
@@ -71,5 +75,15 @@ where
         sl: &mut [u8],
     ) -> Result<(), Error> {
         <P::Target as LoaderImpl>::read_offset(self, off, map_desc, sl)
+    }
+
+    fn write_str(&self, st: &str) -> core::fmt::Result {
+        <P::Target as LoaderImpl>::write_str(self, st)
+    }
+}
+
+impl core::fmt::Write for &(dyn LoaderImpl + '_) {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        <dyn LoaderImpl as LoaderImpl>::write_str(*self, s)
     }
 }

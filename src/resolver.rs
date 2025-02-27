@@ -130,9 +130,12 @@ impl Resolver {
         loader: &'static dyn LoaderImpl,
         fd: *mut c_void,
     ) -> Result<(), Error> {
+        use core::fmt::Write as _;
         let mut ehdr: ElfHeader = ElfHeader::zeroed();
 
         loader.read_offset(0, fd, bytemuck::bytes_of_mut(&mut ehdr))?;
+
+        let _ = ::core::writeln!(&*loader, "ElfHeader: {ehdr:#x?}");
 
         let ph_off = ehdr.e_phoff;
         let ph_num = ehdr.e_phnum as usize;
@@ -140,6 +143,8 @@ impl Resolver {
         let mut phdrs: [ElfPhdr; 32] = bytemuck::zeroed();
 
         loader.read_offset(ph_off, fd, bytemuck::cast_slice_mut(&mut phdrs[..ph_num]))?;
+
+        let _ = ::core::writeln!(&*loader, "{:#x?}", &phdrs[..ph_num]);
 
         let mut load_segments = &phdrs[..];
 
