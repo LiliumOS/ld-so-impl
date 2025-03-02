@@ -101,7 +101,6 @@ impl Resolver {
     #[inline(always)]
     pub fn live_entries(&self) -> &[DynEntry] {
         let mut count = self.head.entry_count.load(Ordering::Acquire);
-        count = (count & 0xFFFF) - (count >> 16);
         let entries = self.static_entries.get().as_mut_ptr();
 
         unsafe { core::slice::from_raw_parts(entries, count) }
@@ -361,7 +360,7 @@ impl Resolver {
                         slot.write(val.offset(addend));
                     }
                 }
-                _ => crash_unrecoverably(),
+                _ => {}
             }
         }
         entry
