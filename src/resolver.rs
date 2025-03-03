@@ -382,9 +382,10 @@ impl Resolver {
         }
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn find_sym(&self, name: &CStr) -> *mut c_void {
-        'entloop: for ent in self.live_entries() {
+        let ents = self.live_entries();
+        'entloop: for ent in ents {
             let sym = if let Some(gnu_hash) = unsafe { ent.gnu_hash.as_ref() } {
                 let hash = hash::gnu_hash(name);
 
