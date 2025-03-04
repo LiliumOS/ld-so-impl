@@ -12,6 +12,10 @@ uint32_t gnu_hash(const uint8_t* name) {
 }
 */
 
+/// Hashes a symbol name according to the algorithm used by DT_GNU_HASH
+/// The algorithm does the following for each non-zero byte `b` of `name`, with `let h = 5381u32;` as the initialization:
+/// * Multiply `h`  by 33,
+/// * Add `b as `u32`
 #[inline(always)]
 pub fn gnu_hash(name: &CStr) -> u32 {
     name.bytes().fold(5381, |v, i| {

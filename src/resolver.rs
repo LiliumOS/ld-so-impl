@@ -261,10 +261,10 @@ impl Resolver {
                     entry.strtab = base.wrapping_add(ent.d_val as usize).cast();
                 }
                 DynEntryType::DT_FLAGS => {
-                    resolve_now &= (ent.d_val & 0x8) != 0;
+                    resolve_now |= (ent.d_val & 0x8) != 0;
                 }
                 DynEntryType::DT_FLAGS_1 => {
-                    resolve_now &= (ent.d_val & 1) != 0;
+                    resolve_now |= (ent.d_val & 1) != 0;
                 }
                 DynEntryType::DT_RELA => {
                     rela = base.wrapping_add(ent.d_val as usize).cast();
@@ -386,6 +386,7 @@ impl Resolver {
     pub fn find_sym(&self, name: &CStr) -> *mut c_void {
         let ents = self.live_entries();
         'entloop: for ent in ents {
+            use core::fmt::Write as _;
             let sym = if let Some(gnu_hash) = unsafe { ent.gnu_hash.as_ref() } {
                 let hash = hash::gnu_hash(name);
 
@@ -406,11 +407,14 @@ impl Resolver {
                 let hash_ent = hash % gnu_hash.nbuckets;
 
                 let bucket = unsafe { bucket_base.add(hash_ent as usize).read() };
-                let chain_ent = bucket - gnu_hash.symoffset;
+                let Some(chain_ent) = bucket.checked_sub(gnu_hash.symoffset) else {
+                    continue;
+                };
 
                 let chain_start = unsafe { chain_base.add(chain_ent as usize) };
                 'inner: {
                     for i in 0.. {
+                        core::hint::black_box(i);
                         let chain = unsafe { chain_start.add(i).read() };
 
                         if (hash & !1) == (chain & !1) {
@@ -492,4 +496,4 @@ pub fn get_sym_name(ent: &DynEntry, n: usize) -> &CStr {
 #[cfg_attr(target_arch = "x86_64", path = "resolver/x86_64.rs")]
 mod arch;
 
-mod hash;
+pub mod hash;

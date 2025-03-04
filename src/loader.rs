@@ -87,3 +87,9 @@ impl core::fmt::Write for &(dyn LoaderImpl + '_) {
         <dyn LoaderImpl as LoaderImpl>::write_str(*self, s)
     }
 }
+
+impl core::fmt::Write for &(dyn LoaderImpl + Sync + '_) {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        <dyn LoaderImpl as LoaderImpl>::write_str(*self, s)
+    }
+}

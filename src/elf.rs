@@ -1020,6 +1020,41 @@ pub use consts::DynEntryType64 as DynEntryType;
 
 pub type ElfSym<Class = ElfHost> = <Class as ElfClass>::Symbol;
 
+/// Used by the DT_GNU_HASH dynamic block
+/// An optimized format for hashing, and horribly undocumented.
+/// The algorithm used for this section is described by [`hash::gnu_hash`][crate::resolver::hash::gnu_hash].
+///
+/// ## `DT_GNU_HASH` Symbol Lookup
+/// The lookup algorithm is roughly as follows: (Adapted partially from <https://flapenguin.me/elf-dt-gnu-hash>, but contains additional info, and may yet still be incomplete)
+///
+/// The structure of the whole [`DT_GNU_HASH`][DynEntryType::DT_GNU_HASH] tag is as follows:
+/// ```rust,ignore
+/// #[repr(C)]
+/// pub struct ElfGnuHashTable {
+///    pub head: ElfGnuHashHeader,
+///    pub bloom: [usize; head.bloom_size], // `usize` is the appropriate `ElfX_Size` type - or the size type for the Elf Class
+///    pub buckets: [u32; head.nbucket],
+///    pub chain: [u32],
+/// }
+/// ```
+///
+/// To lookup a symbol with name `foo`, we compute the `hash` of `foo` using [`hash::gnu_hash(foo)`][crate::resolver::hash::gnu_hash].
+/// We can then check this hash against the `bloom` filter as follows:
+/// ```rust,ignore
+/// let bloom_ent = (hash / usize::BITS) % head.bloom_size; // Again, this is actually `ElfX_Size` where `X` is the current ELFCLASS
+/// let bloom_pos1 = hash % usize::BITS;
+/// let bloom_pos2 = (hash >> head.bloom_shift) % usize::BITS; //
+/// let bloom_val = head.bloom[bloom_ent as usize];
+///
+/// (bloom_val & (1 << bloom_pos1)) && (bloom_val & (1 << bloom_pos2))
+/// ```
+///
+/// Note that testing both bits will not guarantee that the hash is in the table if true, but if either bit is false, the symbol is definitely not in the table.
+///
+/// We then take the symbol offset to start checking from by `buckets[hash % head.nbuckets]`.
+/// This may be less than `head.symoffset`. If it is `0` then the symbol is absent from the table.
+/// > It is not yet know what the behaviour of symbols in `1..head.symoffset` is.
+///
 #[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
 pub struct ElfGnuHashHeader {
