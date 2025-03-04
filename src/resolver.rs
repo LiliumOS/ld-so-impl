@@ -13,7 +13,7 @@ use crate::{
     elf::{
         DynEntryType, ElfClass, ElfDyn, ElfGnuHashHeader, ElfHeader, ElfPhdr, ElfRela,
         ElfRelocation, ElfSym, ElfSymbol,
-        consts::{PT_DYNAMIC, PT_LOAD, ProgramType},
+        consts::{PF_R, PF_W, PT_DYNAMIC, PT_GNU_STACK, PT_LOAD, ProgramType},
     },
     helpers::cstr_from_ptr,
     loader::{Error, LoaderImpl},
@@ -111,12 +111,12 @@ impl Resolver {
         soname: &'static CStr,
         udata: *mut c_void,
         fhdl: *mut c_void,
-    ) {
+    ) -> &'static DynEntry {
         let Some(loader) = self.head.loader else {
             self.resolve_error(soname, Error::Fatal)
         };
         match unsafe { self.load_impl(soname, udata, loader, fhdl) } {
-            Ok(()) => {}
+            Ok(e) => e,
             Err(e) => self.resolve_error(soname, e),
         }
     }
@@ -128,7 +128,7 @@ impl Resolver {
         udata: *mut c_void,
         loader: &'static dyn LoaderImpl,
         fd: *mut c_void,
-    ) -> Result<(), Error> {
+    ) -> Result<&'static DynEntry, Error> {
         use core::fmt::Write as _;
         let mut ehdr: ElfHeader = ElfHeader::zeroed();
 
@@ -172,6 +172,15 @@ impl Resolver {
             .max()
             .unwrap_or(0);
 
+        if cfg!(feature = "deny-wx") {
+            if phdrs.iter().any(|phdr| {
+                (phdr.p_flags & (PF_W | PF_R)) == (PF_W | PF_R)
+                    && ((phdr.p_type == PT_LOAD) || (phdr.p_type == PT_GNU_STACK))
+            }) {
+                return Err(Error::WritableText);
+            }
+        }
+
         let addr = unsafe { loader.alloc_base_addr(udata, highest_pma)? };
 
         let addr = unsafe { loader.map_phdrs(load_segments, fd, addr)? };
@@ -189,14 +198,14 @@ impl Resolver {
 
         let dyn_seg = unsafe { core::slice::from_ptr_range(dyn_addr..end) };
 
-        unsafe {
-            self.resolve_object(addr, dyn_seg, soname, udata);
-        }
-
-        Ok(())
+        Ok(unsafe { self.resolve_object(addr, dyn_seg, soname, udata) })
     }
 
-    pub unsafe fn load(&'static self, name: &'static CStr, udata: *mut c_void) {
+    pub unsafe fn load(
+        &'static self,
+        name: &'static CStr,
+        udata: *mut c_void,
+    ) -> &'static DynEntry {
         let Some(loader) = self.head.loader else {
             self.resolve_error(name, Error::Fatal)
         };
@@ -204,7 +213,7 @@ impl Resolver {
         match unsafe { loader.find(name, udata) }
             .and_then(|fhdl| unsafe { self.load_impl(name, udata, loader, fhdl) })
         {
-            Ok(()) | Err(Error::AssumePresent) => {}
+            Ok(ent) => ent,
             Err(e) => self.resolve_error(name, e),
         }
     }
@@ -383,88 +392,96 @@ impl Resolver {
     }
 
     #[inline]
-    pub fn find_sym(&self, name: &CStr) -> *mut c_void {
-        let ents = self.live_entries();
-        'entloop: for ent in ents {
-            use core::fmt::Write as _;
-            let sym = if let Some(gnu_hash) = unsafe { ent.gnu_hash.as_ref() } {
-                let hash = hash::gnu_hash(name);
+    pub fn find_sym_in(&self, name: &CStr, ent: &DynEntry) -> *mut c_void {
+        use core::fmt::Write as _;
+        let sym = if let Some(gnu_hash) = unsafe { ent.gnu_hash.as_ref() } {
+            let hash = hash::gnu_hash(name);
 
-                let bloom_ent = (hash / usize::BITS) % (gnu_hash.bloom_size);
-                let bloom_pos1 = hash % usize::BITS;
-                let bloom_pos2 = (hash >> gnu_hash.bloom_shift) % usize::BITS;
+            let bloom_ent = (hash / usize::BITS) % (gnu_hash.bloom_size);
+            let bloom_pos1 = hash % usize::BITS;
+            let bloom_pos2 = (hash >> gnu_hash.bloom_shift) % usize::BITS;
 
-                let bloom_base = unsafe { ent.gnu_hash.add(1).cast::<usize>() };
-                let bucket_base =
-                    unsafe { bloom_base.add(gnu_hash.bloom_size as usize).cast::<u32>() };
-                let chain_base = unsafe { bucket_base.add(gnu_hash.nbuckets as usize) };
+            let bloom_base = unsafe { ent.gnu_hash.add(1).cast::<usize>() };
+            let bucket_base = unsafe { bloom_base.add(gnu_hash.bloom_size as usize).cast::<u32>() };
+            let chain_base = unsafe { bucket_base.add(gnu_hash.nbuckets as usize) };
 
-                let bloom_ptr = unsafe { bloom_base.add(bloom_ent as usize).read() };
+            let bloom_ptr = unsafe { bloom_base.add(bloom_ent as usize).read() };
 
-                if (bloom_ptr & (1 << bloom_pos1)) == 0 || (bloom_ptr & (1 << bloom_pos2)) == 0 {
-                    continue 'entloop;
-                }
-                let hash_ent = hash % gnu_hash.nbuckets;
+            if (bloom_ptr & (1 << bloom_pos1)) == 0 || (bloom_ptr & (1 << bloom_pos2)) == 0 {
+                return core::ptr::null_mut();
+            }
+            let hash_ent = hash % gnu_hash.nbuckets;
 
-                let bucket = unsafe { bucket_base.add(hash_ent as usize).read() };
-                let Some(chain_ent) = bucket.checked_sub(gnu_hash.symoffset) else {
-                    continue;
-                };
-
-                let chain_start = unsafe { chain_base.add(chain_ent as usize) };
-                'inner: {
-                    for i in 0.. {
-                        core::hint::black_box(i);
-                        let chain = unsafe { chain_start.add(i).read() };
-
-                        if (hash & !1) == (chain & !1) {
-                            let sym = bucket as usize + i;
-                            let e_name = get_sym_name(ent, sym);
-
-                            if e_name == name {
-                                break 'inner sym;
-                            } else {
-                                continue;
-                            }
-                        }
-
-                        if (chain & 1) == 1 {
-                            break 'inner 0;
-                        }
-                    }
-
-                    break 'inner 0;
-                }
-            } else {
-                let nbuckets = unsafe { ent.hash.read() };
-                let nchain = unsafe { ent.hash.add(1).read() };
-                let buckets = unsafe { ent.hash.add(2) };
-                let chain = unsafe { buckets.add(nbuckets as usize) };
-
-                let hash = hash::svr4_hash(name) % nbuckets;
-
-                let mut bucket = unsafe { buckets.add(hash as usize).read() };
-
-                while bucket != 0 {
-                    let e_name = get_sym_name(ent, bucket as usize);
-
-                    if e_name == name {
-                        break;
-                    }
-
-                    bucket = unsafe { chain.add(bucket as usize).read() };
-                }
-
-                bucket as usize
+            let bucket = unsafe { bucket_base.add(hash_ent as usize).read() };
+            let Some(chain_ent) = bucket.checked_sub(gnu_hash.symoffset) else {
+                return core::ptr::null_mut();
             };
 
-            if sym == 0 {
-                continue;
-            } else {
-                let sym = unsafe { ent.syms.add(sym) };
-                let val = unsafe { (*sym).value() as usize };
+            let chain_start = unsafe { chain_base.add(chain_ent as usize) };
+            'inner: {
+                for i in 0.. {
+                    core::hint::black_box(i);
+                    let chain = unsafe { chain_start.add(i).read() };
 
-                return unsafe { ent.base.add(val) };
+                    if (hash & !1) == (chain & !1) {
+                        let sym = bucket as usize + i;
+                        let e_name = get_sym_name(ent, sym);
+
+                        if e_name == name {
+                            break 'inner sym;
+                        } else {
+                            continue;
+                        }
+                    }
+
+                    if (chain & 1) == 1 {
+                        break 'inner 0;
+                    }
+                }
+
+                break 'inner 0;
+            }
+        } else {
+            let nbuckets = unsafe { ent.hash.read() };
+            let nchain = unsafe { ent.hash.add(1).read() };
+            let buckets = unsafe { ent.hash.add(2) };
+            let chain = unsafe { buckets.add(nbuckets as usize) };
+
+            let hash = hash::svr4_hash(name) % nbuckets;
+
+            let mut bucket = unsafe { buckets.add(hash as usize).read() };
+
+            while bucket != 0 {
+                let e_name = get_sym_name(ent, bucket as usize);
+
+                if e_name == name {
+                    break;
+                }
+
+                bucket = unsafe { chain.add(bucket as usize).read() };
+            }
+
+            bucket as usize
+        };
+
+        if sym == 0 {
+            core::ptr::null_mut()
+        } else {
+            let sym = unsafe { ent.syms.add(sym) };
+            let val = unsafe { (*sym).value() as usize };
+
+            unsafe { ent.base.add(val) }
+        }
+    }
+
+    #[inline]
+    pub fn find_sym(&self, name: &CStr) -> *mut c_void {
+        let ents = self.live_entries();
+        for ent in ents {
+            let addr = self.find_sym_in(name, ent);
+
+            if !addr.is_null() {
+                return addr;
             }
         }
 

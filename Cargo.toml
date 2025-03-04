@@ -19,3 +19,5 @@ overflow-checks = false
 
 [features]
 alloc = []
+tls = []
+deny-wx = []

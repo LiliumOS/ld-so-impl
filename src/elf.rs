@@ -723,6 +723,8 @@ pub mod consts {
             PT_NOTE = 4,
             PT_SHLIB = 5,
             PT_PHDR = 6,
+
+            PT_GNU_STACK = 0x6474e551,
         }
     }
     pub const PF_X: u32 = 1;

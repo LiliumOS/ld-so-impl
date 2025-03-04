@@ -16,6 +16,7 @@ pub enum Error {
     LoadError,
     AllocError,
     Fatal,
+    WritableText,
 }
 
 pub trait LoaderImpl {
@@ -40,6 +41,11 @@ pub trait LoaderImpl {
 
     fn write_str(&self, st: &str) -> core::fmt::Result {
         Ok(())
+    }
+
+    #[cfg(feature = "tls")]
+    fn alloc_tls(&self, tls_size: usize) -> *mut c_void {
+        core::ptr::null_mut()
     }
 }
 
@@ -79,6 +85,11 @@ where
 
     fn write_str(&self, st: &str) -> core::fmt::Result {
         <P::Target as LoaderImpl>::write_str(self, st)
+    }
+
+    #[cfg(feature = "tls")]
+    fn alloc_tls(&self, tls_size: usize) -> *mut c_void {
+        <P::Target as LoaderImpl>::alloc_tls(self, tls_size)
     }
 }
 
