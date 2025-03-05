@@ -33,6 +33,7 @@ pub struct DynEntry {
     plt_rela: *const ElfRela,
     resolver: Option<&'static Resolver>,
     gnu_hash: *const ElfGnuHashHeader,
+    dyn_section: *const ElfDyn,
 }
 
 unsafe impl Send for DynEntry {}
@@ -108,23 +109,23 @@ impl Resolver {
 
     pub unsafe fn load_from_handle(
         &'static self,
-        soname: &'static CStr,
+        soname: Option<&'static CStr>,
         udata: *mut c_void,
         fhdl: *mut c_void,
     ) -> &'static DynEntry {
         let Some(loader) = self.head.loader else {
-            self.resolve_error(soname, Error::Fatal)
+            self.resolve_error(soname.unwrap_or(c"<unnamed module>"), Error::Fatal)
         };
         match unsafe { self.load_impl(soname, udata, loader, fhdl) } {
             Ok(e) => e,
-            Err(e) => self.resolve_error(soname, e),
+            Err(e) => self.resolve_error(soname.unwrap_or(c"<unnamed module>"), e),
         }
     }
 
     #[inline]
     unsafe fn load_impl(
         &'static self,
-        soname: &'static CStr,
+        soname: Option<&'static CStr>,
         udata: *mut c_void,
         loader: &'static dyn LoaderImpl,
         fd: *mut c_void,
@@ -211,7 +212,7 @@ impl Resolver {
         };
 
         match unsafe { loader.find(name, udata) }
-            .and_then(|fhdl| unsafe { self.load_impl(name, udata, loader, fhdl) })
+            .and_then(|fhdl| unsafe { self.load_impl(Some(name), udata, loader, fhdl) })
         {
             Ok(ent) => ent,
             Err(e) => self.resolve_error(name, e),
@@ -229,19 +230,20 @@ impl Resolver {
         &'static self,
         base: *mut c_void,
         dyn_ent: &[ElfDyn],
-        name: &'static CStr,
+        name: Option<&'static CStr>,
         udata: *mut c_void,
     ) -> &'static DynEntry {
         let mut entry = DynEntry {
             got: core::ptr::null_mut(),
             base,
             syms: core::ptr::null(),
-            name: Some(unsafe { NonNull::new_unchecked(name.as_ptr().cast_mut()) }),
+            name: name.map(|name| unsafe { NonNull::new_unchecked(name.as_ptr().cast_mut()) }),
             strtab: core::ptr::null(),
             hash: core::ptr::null(),
             plt_rela: core::ptr::null(),
             resolver: Some(self),
             gnu_hash: core::ptr::null(),
+            dyn_section: dyn_ent.as_ptr(),
         };
 
         let mut rela = core::ptr::null::<ElfRela>();
@@ -280,6 +282,13 @@ impl Resolver {
                 }
                 DynEntryType::DT_RELASZ => {
                     rela_count = ent.d_val as usize / core::mem::size_of::<ElfRela>();
+                }
+                DynEntryType::DT_SONAME => {
+                    if entry.name.is_none() {
+                        entry.name.insert(unsafe {
+                            NonNull::new_unchecked(base.wrapping_add(ent.d_val as usize).cast())
+                        });
+                    }
                 }
                 _ => {}
             }

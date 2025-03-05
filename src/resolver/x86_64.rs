@@ -8,6 +8,9 @@ pub const JUMP_SLOT_RELOC: u64 = 7;
 pub const GLOB_DAT_RELOC: u64 = 6;
 pub const RELATIVE_RELOC: u64 = 8;
 
+pub const GTPMOD_RELOC: u64 = 16;
+pub const GTPOFF_RELOC: u64 = 16;
+
 unsafe extern "C" {
     pub safe static _plt_resolve_sym_impl: c_void;
 }
