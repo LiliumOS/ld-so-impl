@@ -1,7 +1,7 @@
 use core::ffi::{CStr, c_void};
 
 use crate::{
-    elf::{ElfAddr, ElfOffset, ElfPhdr},
+    elf::{ElfAddr, ElfOffset, ElfPhdr, ElfSize},
     resolver::Resolver,
 };
 
@@ -44,8 +44,24 @@ pub trait LoaderImpl {
     }
 
     #[cfg(feature = "tls")]
-    fn alloc_tls(&self, tls_size: usize) -> *mut c_void {
-        core::ptr::null_mut()
+    fn alloc_tls(&self, tls_size: usize) -> Result<usize, Error> {
+        Err(Error::AllocError)
+    }
+
+    #[cfg(feature = "tls")]
+    fn load_tls(
+        &self,
+        tls_module: usize,
+        desc: *mut c_void,
+        off: ElfOffset,
+        sz: ElfSize,
+    ) -> Result<(), Error> {
+        Err(Error::LoadError)
+    }
+
+    #[cfg(feature = "tls")]
+    fn tls_direct_offset(&self, module: usize) -> Result<usize, Error> {
+        Err(Error::LoadError)
     }
 }
 
@@ -88,8 +104,19 @@ where
     }
 
     #[cfg(feature = "tls")]
-    fn alloc_tls(&self, tls_size: usize) -> *mut c_void {
+    fn alloc_tls(&self, tls_size: usize) -> Result<usize, Error> {
         <P::Target as LoaderImpl>::alloc_tls(self, tls_size)
+    }
+
+    #[cfg(feature = "tls")]
+    fn load_tls(
+        &self,
+        tls_module: usize,
+        desc: *mut c_void,
+        off: ElfOffset,
+        sz: ElfSize,
+    ) -> Result<(), Error> {
+        <P::Target as LoaderImpl>::load_tls(self, tls_module, desc, off, sz)
     }
 }
 

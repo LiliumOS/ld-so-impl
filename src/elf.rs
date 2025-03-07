@@ -723,6 +723,7 @@ pub mod consts {
             PT_NOTE = 4,
             PT_SHLIB = 5,
             PT_PHDR = 6,
+            PT_TLS = 7,
 
             PT_GNU_STACK = 0x6474e551,
         }

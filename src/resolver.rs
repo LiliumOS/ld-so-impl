@@ -13,7 +13,7 @@ use crate::{
     elf::{
         DynEntryType, ElfClass, ElfDyn, ElfGnuHashHeader, ElfHeader, ElfPhdr, ElfRela,
         ElfRelocation, ElfSym, ElfSymbol,
-        consts::{PF_R, PF_W, PT_DYNAMIC, PT_GNU_STACK, PT_LOAD, ProgramType},
+        consts::{PF_R, PF_W, PT_DYNAMIC, PT_GNU_STACK, PT_LOAD, PT_TLS, ProgramType},
     },
     helpers::cstr_from_ptr,
     loader::{Error, LoaderImpl},
@@ -34,6 +34,9 @@ pub struct DynEntry {
     resolver: Option<&'static Resolver>,
     gnu_hash: *const ElfGnuHashHeader,
     dyn_section: *const ElfDyn,
+
+    #[cfg(feature = "tls")]
+    tls_module: usize,
 }
 
 unsafe impl Send for DynEntry {}
@@ -154,7 +157,6 @@ impl Resolver {
                 break;
             }
         }
-
         for i in (0..load_segments.len()).rev() {
             if load_segments[i].p_type == PT_LOAD {
                 load_segments = &load_segments[..=i];
@@ -186,6 +188,16 @@ impl Resolver {
 
         let addr = unsafe { loader.map_phdrs(load_segments, fd, addr)? };
 
+        let mut tls_module = !0;
+
+        if cfg!(feature = "tls") {
+            if let Some(phdr) = phdrs.iter().find(|v| v.p_type == PT_TLS) {
+                tls_module = loader.alloc_tls(phdr.p_memsz as usize)?;
+
+                loader.load_tls(tls_module, fd, phdr.p_offset, phdr.p_filesz)?;
+            }
+        }
+
         let dyn_addr = addr
             .wrapping_add(dyn_phdr.p_paddr as usize)
             .cast::<ElfDyn>()
@@ -199,7 +211,7 @@ impl Resolver {
 
         let dyn_seg = unsafe { core::slice::from_ptr_range(dyn_addr..end) };
 
-        Ok(unsafe { self.resolve_object(addr, dyn_seg, soname, udata) })
+        Ok(unsafe { self.resolve_object(addr, dyn_seg, soname, udata, tls_module) })
     }
 
     pub unsafe fn load(
@@ -232,6 +244,7 @@ impl Resolver {
         dyn_ent: &[ElfDyn],
         name: Option<&'static CStr>,
         udata: *mut c_void,
+        #[allow(unused_variables)] tls_module: usize,
     ) -> &'static DynEntry {
         let mut entry = DynEntry {
             got: core::ptr::null_mut(),
@@ -244,6 +257,8 @@ impl Resolver {
             resolver: Some(self),
             gnu_hash: core::ptr::null(),
             dyn_section: dyn_ent.as_ptr(),
+            #[cfg(feature = "tls")]
+            tls_module,
         };
 
         let mut rela = core::ptr::null::<ElfRela>();
@@ -347,13 +362,22 @@ impl Resolver {
                 arch::GLOB_DAT_RELOC | arch::JUMP_SLOT_RELOC => {
                     let sym = rela.symbol() as usize;
 
-                    let name = get_sym_name(entry, sym);
+                    let sym_desc = unsafe { entry.syms.add(sym).read() };
+                    let val = if sym_desc.section() != 0
+                        && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
+                    {
+                        // local or protected symbol. We know what the address is
+                        base.wrapping_add(sym_desc.value() as usize)
+                    } else {
+                        let name = get_sym_name(entry, sym);
 
-                    let val = self.find_sym(name);
+                        let val = self.find_sym(name);
 
-                    if val.is_null() {
-                        self.resolve_error(name, Error::SymbolNotFound)
-                    }
+                        if val.is_null() && (sym_desc.info() >> 4) != 2 {
+                            self.resolve_error(name, Error::SymbolNotFound)
+                        }
+                        val
+                    };
 
                     let addend = rela.addend() as isize;
 
@@ -376,6 +400,98 @@ impl Resolver {
                     let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
                     unsafe {
                         slot.write(val.offset(addend));
+                    }
+                }
+                #[cfg(feature = "tls")]
+                arch::TPOFF_RELOC => {
+                    let sym = rela.symbol() as usize;
+
+                    let sym_desc = unsafe { entry.syms.add(sym).read() };
+                    let name = get_sym_name(entry, sym);
+                    let (ent, off): (&DynEntry, usize) = if sym_desc.section() != 0
+                        && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
+                    {
+                        // local or protected symbol. We know what the address is
+                        (entry, sym_desc.value() as usize)
+                    } else {
+                        let Some(val) = self.find_sym_module_offset(name) else {
+                            self.resolve_error(name, Error::SymbolNotFound)
+                        };
+                        val
+                    };
+
+                    let module = ent.tls_module;
+
+                    let Some(loader) = self.head.loader else {
+                        self.resolve_error(name, Error::Fatal)
+                    };
+
+                    let moff = loader
+                        .tls_direct_offset(module)
+                        .unwrap_or_else(|e| self.resolve_error(name, e)); // Errors if we can't do a `TPOFF` reloc 
+
+                    let val = moff + off;
+
+                    let offset = rela.at_offset() as usize;
+
+                    let slot = unsafe { base.add(offset).cast::<usize>() };
+                    unsafe {
+                        slot.write(val);
+                    }
+                }
+                #[cfg(feature = "tls")]
+                arch::DTPOFF_RELOC => {
+                    let sym = rela.symbol() as usize;
+
+                    let sym_desc = unsafe { entry.syms.add(sym).read() };
+                    let name = get_sym_name(entry, sym);
+                    let (_, off): (&DynEntry, usize) = if sym_desc.section() != 0
+                        && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
+                    {
+                        // local or protected symbol. We know what the address is
+                        (entry, sym_desc.value() as usize)
+                    } else {
+                        let Some(val) = self.find_sym_module_offset(name) else {
+                            self.resolve_error(name, Error::SymbolNotFound)
+                        };
+                        val
+                    };
+
+                    let val = off;
+
+                    let offset = rela.at_offset() as usize;
+
+                    let slot = unsafe { base.add(offset).cast::<usize>() };
+                    unsafe {
+                        slot.write(val);
+                    }
+                }
+                #[cfg(feature = "tls")]
+                arch::DTPMOD_RELOC => {
+                    let sym = rela.symbol() as usize;
+                    let name = get_sym_name(entry, sym);
+                    let sym_desc = unsafe { entry.syms.add(sym).read() };
+                    let (ent, _): (&DynEntry, usize) = if sym_desc.section() != 0
+                        && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
+                    {
+                        // local or protected symbol. We know what the address is
+                        (entry, sym_desc.value() as usize)
+                    } else {
+                        let Some(val) = self.find_sym_module_offset(name) else {
+                            self.resolve_error(name, Error::SymbolNotFound)
+                        };
+                        val
+                    };
+
+                    let module = ent.tls_module;
+
+                    let val = module;
+
+                    let offset = rela.at_offset() as usize;
+
+                    let slot = unsafe { base.add(offset).cast::<usize>() };
+                    unsafe {
+                        slot.write(val);
                     }
                 }
                 _ => {}
@@ -401,9 +517,8 @@ impl Resolver {
     }
 
     #[inline]
-    pub fn find_sym_in(&self, name: &CStr, ent: &DynEntry) -> *mut c_void {
-        use core::fmt::Write as _;
-        let sym = if let Some(gnu_hash) = unsafe { ent.gnu_hash.as_ref() } {
+    pub fn find_sym_offset_in(&self, name: &CStr, ent: &DynEntry) -> usize {
+        if let Some(gnu_hash) = unsafe { ent.gnu_hash.as_ref() } {
             let hash = hash::gnu_hash(name);
 
             let bloom_ent = (hash / usize::BITS) % (gnu_hash.bloom_size);
@@ -417,13 +532,13 @@ impl Resolver {
             let bloom_ptr = unsafe { bloom_base.add(bloom_ent as usize).read() };
 
             if (bloom_ptr & (1 << bloom_pos1)) == 0 || (bloom_ptr & (1 << bloom_pos2)) == 0 {
-                return core::ptr::null_mut();
+                return !0;
             }
             let hash_ent = hash % gnu_hash.nbuckets;
 
             let bucket = unsafe { bucket_base.add(hash_ent as usize).read() };
             let Some(chain_ent) = bucket.checked_sub(gnu_hash.symoffset) else {
-                return core::ptr::null_mut();
+                return !0;
             };
 
             let chain_start = unsafe { chain_base.add(chain_ent as usize) };
@@ -471,9 +586,15 @@ impl Resolver {
             }
 
             bucket as usize
-        };
+        }
+    }
 
-        if sym == 0 {
+    #[inline]
+    pub fn find_sym_in(&self, name: &CStr, ent: &DynEntry) -> *mut c_void {
+        use core::fmt::Write as _;
+        let sym = self.find_sym_offset_in(name, ent);
+
+        if sym == !0 {
             core::ptr::null_mut()
         } else {
             let sym = unsafe { ent.syms.add(sym) };
@@ -481,6 +602,18 @@ impl Resolver {
 
             unsafe { ent.base.add(val) }
         }
+    }
+
+    #[inline]
+    pub fn find_sym_module_offset(&self, name: &CStr) -> Option<(&DynEntry, usize)> {
+        for ent in self.live_entries() {
+            let sym = self.find_sym_offset_in(name, ent);
+
+            if sym != !0 {
+                return Some((ent, sym));
+            }
+        }
+        None
     }
 
     #[inline]
