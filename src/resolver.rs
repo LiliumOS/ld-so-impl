@@ -13,7 +13,7 @@ use crate::{
     elf::{
         DynEntryType, ElfClass, ElfDyn, ElfGnuHashHeader, ElfHeader, ElfPhdr, ElfRela,
         ElfRelocation, ElfSym, ElfSymbol,
-        consts::{PF_R, PF_W, PT_DYNAMIC, PT_GNU_STACK, PT_LOAD, PT_TLS, ProgramType},
+        consts::{PF_R, PF_W, PF_X, PT_DYNAMIC, PT_GNU_STACK, PT_LOAD, PT_TLS, ProgramType},
     },
     helpers::cstr_from_ptr,
     loader::{Error, LoaderImpl},
@@ -177,8 +177,8 @@ impl Resolver {
 
         if cfg!(feature = "deny-wx") {
             if phdrs.iter().any(|phdr| {
-                (phdr.p_flags & (PF_W | PF_R)) == (PF_W | PF_R)
-                    && ((phdr.p_type == PT_LOAD) || (phdr.p_type == PT_GNU_STACK))
+                (phdr.p_flags & (PF_W | PF_X)) == (PF_W | PF_X)
+                    && ((phdr.p_type == PT_LOAD)/*|| (phdr.p_type == PT_GNU_STACK)*/)
             }) {
                 return Err(Error::WritableText);
             }
@@ -471,8 +471,9 @@ impl Resolver {
                     let sym = rela.symbol() as usize;
                     let name = get_sym_name(entry, sym);
                     let sym_desc = unsafe { entry.syms.add(sym).read() };
-                    let (ent, _): (&DynEntry, usize) = if sym_desc.section() != 0
-                        && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
+                    let (ent, _): (&DynEntry, usize) = if sym == 0
+                        || (sym_desc.section() != 0
+                            && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0))
                     {
                         // local or protected symbol. We know what the address is
                         (entry, sym_desc.value() as usize)
