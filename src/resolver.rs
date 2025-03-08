@@ -15,7 +15,7 @@ use crate::{
         ElfRelocation, ElfSym, ElfSymbol,
         consts::{PF_R, PF_W, PF_X, PT_DYNAMIC, PT_GNU_STACK, PT_LOAD, PT_TLS, ProgramType},
     },
-    helpers::cstr_from_ptr,
+    helpers::{cstr_from_ptr, strlen_impl},
     loader::{Error, LoaderImpl},
     safe_addr_of,
 };
@@ -138,16 +138,12 @@ impl Resolver {
 
         loader.read_offset(0, fd, bytemuck::bytes_of_mut(&mut ehdr))?;
 
-        let _ = ::core::writeln!(&*loader, "ElfHeader: {ehdr:#x?}");
-
         let ph_off = ehdr.e_phoff;
         let ph_num = ehdr.e_phnum as usize;
 
         let mut phdrs: [ElfPhdr; 32] = bytemuck::zeroed();
 
         loader.read_offset(ph_off, fd, bytemuck::cast_slice_mut(&mut phdrs[..ph_num]))?;
-
-        let _ = ::core::writeln!(&*loader, "{:#x?}", &phdrs[..ph_num]);
 
         let mut load_segments = &phdrs[..];
 
@@ -356,6 +352,14 @@ impl Resolver {
         }
         let rela = unsafe { core::slice::from_raw_parts(rela, rela_count) };
 
+        let soname = if let Some(soname) = entry.name {
+            unsafe {
+                core::str::from_raw_parts(soname.as_ptr().cast(), strlen_impl(soname.as_ptr()))
+            }
+        } else {
+            "<unnamed>"
+        };
+
         for rela in rela {
             match rela.rel_type() {
                 arch::JUMP_SLOT_RELOC if !resolve_now => {}
@@ -495,7 +499,12 @@ impl Resolver {
                         slot.write(val);
                     }
                 }
-                _ => {}
+                x => {
+                    if let Some(mut loader) = self.head.loader {
+                        use core::fmt::Write as _;
+                        let _ = writeln!(loader, "{soname}: Unexpected relocation type {x}");
+                    }
+                }
             }
         }
         entry
