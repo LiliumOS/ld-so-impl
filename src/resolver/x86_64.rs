@@ -4,6 +4,7 @@ use crate::elf::{ElfRela, ElfRelocation};
 
 use super::DynEntry;
 
+pub const WORD_RELOC: u64 = 1;
 pub const JUMP_SLOT_RELOC: u64 = 7;
 pub const GLOB_DAT_RELOC: u64 = 6;
 pub const RELATIVE_RELOC: u64 = 8;

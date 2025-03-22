@@ -242,6 +242,7 @@ impl Resolver {
         udata: *mut c_void,
         #[allow(unused_variables)] tls_module: usize,
     ) -> &'static DynEntry {
+        use core::fmt::Write as _;
         let mut entry = DynEntry {
             got: core::ptr::null_mut(),
             base,
@@ -293,6 +294,17 @@ impl Resolver {
                 }
                 DynEntryType::DT_RELASZ => {
                     rela_count = ent.d_val as usize / core::mem::size_of::<ElfRela>();
+                }
+                DynEntryType::DT_RELAENT => {
+                    if ent.d_val as usize != core::mem::size_of::<ElfRela>() {
+                        let _ = writeln!(
+                            { self },
+                            "Bad relaent. Expected {}, got {}",
+                            core::mem::size_of::<ElfRela>(),
+                            ent.d_val
+                        );
+                        crash_unrecoverably();
+                    }
                 }
                 DynEntryType::DT_SONAME => {
                     if entry.name.is_none() {
@@ -363,7 +375,7 @@ impl Resolver {
         for rela in rela {
             match rela.rel_type() {
                 arch::JUMP_SLOT_RELOC if !resolve_now => {}
-                arch::GLOB_DAT_RELOC | arch::JUMP_SLOT_RELOC => {
+                arch::WORD_RELOC | arch::GLOB_DAT_RELOC | arch::JUMP_SLOT_RELOC => {
                     let sym = rela.symbol() as usize;
 
                     let sym_desc = unsafe { entry.syms.add(sym).read() };
@@ -393,8 +405,6 @@ impl Resolver {
                     }
                 }
                 arch::RELATIVE_RELOC => {
-                    let sym = rela.symbol() as usize;
-
                     let val = base;
 
                     let addend = rela.addend() as isize;
@@ -641,6 +651,16 @@ impl Resolver {
             delegate.find_sym(name)
         } else {
             core::ptr::null_mut()
+        }
+    }
+}
+
+impl core::fmt::Write for &Resolver {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        if let Some(loader) = self.head.loader {
+            loader.write_str(s)
+        } else {
+            Ok(())
         }
     }
 }
