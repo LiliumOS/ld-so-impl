@@ -31,6 +31,7 @@ pub struct DynEntry {
     strtab: *const c_char,
     hash: *const u32,
     plt_rela: *const ElfRela,
+    plt_relasz: usize,
     resolver: Option<&'static Resolver>,
     gnu_hash: *const ElfGnuHashHeader,
     dyn_section: *const ElfDyn,
@@ -50,6 +51,7 @@ struct ResolverHead {
     cb_resolve_err: Option<fn(&CStr, Error) -> !>,
     loader: Option<&'static (dyn LoaderImpl + Sync)>,
     delegate: Option<&'static Resolver>,
+    force_resolve_now: bool,
 }
 
 const STATIC_RESOLVER_ENTRY_COUNT: usize =
@@ -77,9 +79,14 @@ impl Resolver {
             cb_resolve_err: None,
             loader: None,
             delegate: None,
+            force_resolve_now: false,
         },
         static_entries: SyncUnsafeCell::new(bytemuck::zeroed()),
     };
+
+    pub fn force_resolve_now(&mut self) {
+        self.head.force_resolve_now = true;
+    }
 
     #[inline(always)]
     pub fn delegate(&mut self, other: &'static Resolver) {
@@ -259,6 +266,7 @@ impl Resolver {
             strtab: core::ptr::null(),
             hash: core::ptr::null(),
             plt_rela: core::ptr::null(),
+            plt_relasz: 0,
             resolver: Some(self),
             gnu_hash: core::ptr::null(),
             dyn_section: dyn_ent.as_ptr(),
@@ -269,7 +277,11 @@ impl Resolver {
         let mut rela = core::ptr::null::<ElfRela>();
         let mut rela_count = 0;
 
-        let mut resolve_now = false;
+        let mut resolve_now = self.head.force_resolve_now;
+
+        let mut init = core::ptr::null::<c_void>();
+        let mut init_array = core::ptr::null::<*const c_void>();
+        let mut init_arraysz = 0;
 
         for ent in dyn_ent {
             match ent.d_tag {
@@ -314,6 +326,23 @@ impl Resolver {
                         crash_unrecoverably();
                     }
                 }
+                DynEntryType::DT_JMPREL => {
+                    entry.plt_rela = base.wrapping_add(ent.d_val as usize).cast();
+                }
+                // DynEntryType::DT_PLTREL => {
+                //     if ent.d_val != DynEntryType::DT_RELA {
+                //         let _ = writeln!(
+                //             { self },
+                //             "Bad relaent. Expected {}, got {}",
+                //             DynEntryType::DT_RELA,
+                //             ent.d_val
+                //         );
+                //         crash_unrecoverably();
+                //     }
+                // }
+                DynEntryType::DT_PLTRELSZ => {
+                    entry.plt_relasz = ent.d_val as usize / core::mem::size_of::<ElfRela>();
+                }
                 DynEntryType::DT_SONAME => {
                     if entry.name.is_none() {
                         let _ = entry.name.insert(unsafe {
@@ -322,6 +351,15 @@ impl Resolver {
                             ))
                         });
                     }
+                }
+                DynEntryType::DT_INIT => {
+                    init = base.wrapping_add(ent.d_val as usize).cast();
+                }
+                DynEntryType::DT_INIT_ARRAY => {
+                    init_array = base.wrapping_add(ent.d_val as usize).cast();
+                }
+                DynEntryType::DT_INIT_ARRAYSZ => {
+                    init_arraysz = base as usize / core::mem::size_of::<*const c_void>();
                 }
                 _ => {}
             }
@@ -384,8 +422,7 @@ impl Resolver {
 
         for rela in rela {
             match rela.rel_type() {
-                arch::JUMP_SLOT_RELOC if !resolve_now => {}
-                arch::WORD_RELOC | arch::GLOB_DAT_RELOC | arch::JUMP_SLOT_RELOC => {
+                arch::WORD_RELOC | arch::GLOB_DAT_RELOC => {
                     let sym = rela.symbol() as usize;
 
                     let sym_desc = unsafe { entry.syms.add(sym).read() };
@@ -527,6 +564,67 @@ impl Resolver {
                 }
             }
         }
+
+        if resolve_now {
+            let jumprel = unsafe { core::slice::from_raw_parts(entry.plt_rela, entry.plt_relasz) };
+
+            for rela in jumprel {
+                match rela.rel_type() {
+                    arch::JUMP_SLOT_RELOC => {
+                        let sym = rela.symbol() as usize;
+
+                        let sym_desc = unsafe { entry.syms.add(sym).read() };
+                        let val = if sym_desc.section() != 0
+                            && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
+                        {
+                            // local or protected symbol. We know what the address is
+                            base.wrapping_add(sym_desc.value() as usize)
+                        } else {
+                            let name = get_sym_name(entry, sym);
+
+                            let val = self.find_sym(name);
+
+                            if val.is_null() && (sym_desc.info() >> 4) != 2 {
+                                self.resolve_error(name, Error::SymbolNotFound)
+                            }
+                            val
+                        };
+
+                        let addend = rela.addend() as isize;
+
+                        let offset = rela.at_offset() as usize;
+
+                        let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
+                        unsafe {
+                            slot.write(val.offset(addend));
+                        }
+                    }
+                    x => {
+                        if let Some(mut loader) = self.head.loader {
+                            use core::fmt::Write as _;
+                            let _ = writeln!(loader, "{soname}: Unexpected relocation type {x}");
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(init) = unsafe { core::mem::transmute::<_, Option<extern "C" fn()>>(init) } {
+            init()
+        }
+
+        if let Some(init_arr) =
+            unsafe { core::ptr::slice_from_raw_parts(init_array, init_arraysz).as_ref() }
+        {
+            for init in init_arr {
+                if let Some(init) =
+                    unsafe { core::mem::transmute::<_, Option<extern "C" fn()>>(init) }
+                {
+                    init()
+                }
+            }
+        }
+
         entry
     }
 
