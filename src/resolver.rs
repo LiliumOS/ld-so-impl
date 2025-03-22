@@ -359,7 +359,7 @@ impl Resolver {
                     init_array = base.wrapping_add(ent.d_val as usize).cast();
                 }
                 DynEntryType::DT_INIT_ARRAYSZ => {
-                    init_arraysz = base as usize / core::mem::size_of::<*const c_void>();
+                    init_arraysz = ent.d_val as usize / core::mem::size_of::<*const c_void>();
                 }
                 _ => {}
             }
@@ -616,7 +616,10 @@ impl Resolver {
         if let Some(init_arr) =
             unsafe { core::ptr::slice_from_raw_parts(init_array, init_arraysz).as_ref() }
         {
-            for init in init_arr {
+            for &init in init_arr {
+                if init.is_null() || init.addr() == !0 {
+                    continue;
+                }
                 if let Some(init) =
                     unsafe { core::mem::transmute::<_, Option<extern "C" fn()>>(init) }
                 {
