@@ -15,19 +15,19 @@ use crate::{
         ElfRelocation, ElfSym, ElfSymbol,
         consts::{PF_R, PF_W, PF_X, PT_DYNAMIC, PT_GNU_STACK, PT_LOAD, PT_TLS, ProgramType},
     },
-    helpers::{cstr_from_ptr, strlen_impl},
+    helpers::{NamePtr, cstr_from_ptr, strlen_impl},
     loader::{Error, LoaderImpl},
     safe_addr_of,
 };
 
 #[cfg_attr(target_pointer_width = "64", repr(C, align(128)))]
 #[cfg_attr(target_pointer_width = "32", repr(C, align(64)))]
-#[derive(Copy, Clone, Zeroable)]
+#[derive(Copy, Clone, Zeroable, Debug)]
 pub struct DynEntry {
     got: *mut *const c_void,
     base: *mut c_void,
     syms: *const ElfSym,
-    name: Option<NonNull<c_char>>,
+    name: Option<NamePtr>,
     strtab: *const c_char,
     hash: *const u32,
     plt_rela: *const ElfRela,
@@ -59,6 +59,12 @@ const STATIC_RESOLVER_ENTRY_COUNT: usize =
 pub struct Resolver {
     head: ResolverHead,
     static_entries: SyncUnsafeCell<[DynEntry; STATIC_RESOLVER_ENTRY_COUNT]>,
+}
+
+impl core::fmt::Debug for Resolver {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Resolver")
+    }
 }
 
 pub struct ResolveError {}
@@ -247,7 +253,9 @@ impl Resolver {
             got: core::ptr::null_mut(),
             base,
             syms: core::ptr::null(),
-            name: name.map(|name| unsafe { NonNull::new_unchecked(name.as_ptr().cast_mut()) }),
+            name: name
+                .map(|name| unsafe { NonNull::new_unchecked(name.as_ptr().cast_mut()) })
+                .map(|name| unsafe { NamePtr::new_unchecked(name) }),
             strtab: core::ptr::null(),
             hash: core::ptr::null(),
             plt_rela: core::ptr::null(),
@@ -308,8 +316,10 @@ impl Resolver {
                 }
                 DynEntryType::DT_SONAME => {
                     if entry.name.is_none() {
-                        entry.name.insert(unsafe {
-                            NonNull::new_unchecked(base.wrapping_add(ent.d_val as usize).cast())
+                        let _ = entry.name.insert(unsafe {
+                            NamePtr::new_unchecked(NonNull::new_unchecked(
+                                base.wrapping_add(ent.d_val as usize).cast(),
+                            ))
                         });
                     }
                 }

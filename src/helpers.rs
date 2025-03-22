@@ -1,5 +1,7 @@
 use core::ffi::{CStr, c_char};
 
+use bytemuck::{PodInOption, ZeroableInOption};
+
 #[unsafe(export_name = "strlen")]
 pub unsafe extern "C" fn strlen_impl(p: *const c_char) -> usize {
     let mut len = 0;
@@ -28,4 +30,32 @@ macro_rules! hidden_syms{
 
 hidden_syms! {
     strlen_impl,
+}
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq)]
+pub struct NamePtr(core::ptr::NonNull<c_char>);
+
+impl core::ops::Deref for NamePtr {
+    type Target = CStr;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { cstr_from_ptr(self.0.as_ptr()) }
+    }
+}
+
+unsafe impl ZeroableInOption for NamePtr {}
+
+impl NamePtr {
+    pub const unsafe fn new_unchecked(ptr: core::ptr::NonNull<c_char>) -> Self {
+        Self(ptr)
+    }
+}
+
+impl core::fmt::Debug for NamePtr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let str = &**self;
+
+        str.fmt(f)
+    }
 }
