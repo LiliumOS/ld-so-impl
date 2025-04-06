@@ -469,11 +469,14 @@ impl Resolver {
 
                     let sym_desc = unsafe { entry.syms.add(sym).read() };
                     let name = get_sym_name(entry, sym);
+
                     let (ent, off): (&DynEntry, usize) = if sym_desc.section() != 0
                         && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
                     {
                         // local or protected symbol. We know what the address is
                         (entry, sym_desc.value() as usize)
+                    } else if name == c"" {
+                        (entry, 0)
                     } else {
                         let Some(val) = self.find_sym_module_offset(name) else {
                             self.resolve_error(name, Error::SymbolNotFound)
