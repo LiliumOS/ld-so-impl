@@ -1054,9 +1054,26 @@ pub type ElfSym<Class = ElfHost> = <Class as ElfClass>::Symbol;
 ///
 /// Note that testing both bits will not guarantee that the hash is in the table if true, but if either bit is false, the symbol is definitely not in the table.
 ///
-/// We then take the symbol offset to start checking from by `buckets[hash % head.nbuckets]`.
+/// We then take the symbol index to start checking from by `buckets[hash % head.nbuckets]`.
 /// This may be less than `head.symoffset`. If it is `0` then the symbol is absent from the table.
-/// > It is not yet know what the behaviour of symbols in `1..head.symoffset` is.
+/// > It is not yet know what the behaviour of symbols in `1..head.symoffset` is, or if these values are allowed to appear.
+/// > The implementation in this library assumes they can appear and treats them identically to a `0` value.
+///
+/// The chain index is taken by subtracting `head.symoffset` from this index. The top 31 bits of this chain entry is the top 31 bits of the hash value of the corresponding symbol.
+/// The hash is compared ignoring the lower bit. If they match, the symbol index can be looked up in the dynamic symbol table and a name comparison can be done.
+/// If either the hash comparison or the name comparison fails, the least significant bit of the chain determines the following behavior:
+/// * If the last bit is `0`, the next symbol in the bucket can be checked. This is the subsequent entry in both in the symbol table and in the chain array (unlike `DT_HASH`, a pointer is not followed).
+/// * If the last bit is `1`, this is the last entry in the current bucket, and the symbol is not present in the table.
+///
+/// ## Symbol Table format
+///
+/// The support the ordering requirements set by the chain array and the bucket array, the following constraints are placed on the dynamic symbol table (accessible from `DT_SYMTAB`):
+/// * All symbols in the hashtable must be contiguous,
+/// * The layout of the symbols that belong to the hashtable in the symbol table exactly corresponds to the layout of the chain array, in particular:
+///    * The symbols are grouped by which bucket entry they fall into and,
+///    * They are ordered such that the corresponding entry in the chain array has the value corresponding to the hash of the symbol name.
+///
+/// Note that the requirement only applies to symbols that belong in the hashtable (which are all symbols starting from `head.symoffset`).
 ///
 #[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
