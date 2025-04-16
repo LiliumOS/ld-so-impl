@@ -25,7 +25,7 @@ use crate::{
 #[derive(Copy, Clone, Zeroable, Debug)]
 pub struct DynEntry {
     got: *mut *const c_void,
-    base: *mut c_void,
+    pub base: *mut c_void,
     syms: *const ElfSym,
     name: Option<NamePtr>,
     strtab: *const c_char,
@@ -34,7 +34,7 @@ pub struct DynEntry {
     plt_relasz: usize,
     resolver: Option<&'static Resolver>,
     gnu_hash: *const ElfGnuHashHeader,
-    dyn_section: *const ElfDyn,
+    pub dyn_section: *const ElfDyn,
 
     #[cfg(feature = "tls")]
     tls_module: usize,
