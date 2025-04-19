@@ -201,7 +201,7 @@ impl Resolver {
 
         if cfg!(feature = "tls") {
             if let Some(phdr) = phdrs.iter().find(|v| v.p_type == PT_TLS) {
-                tls_module = loader.alloc_tls(phdr.p_memsz as usize)?;
+                tls_module = loader.alloc_tls(phdr.p_memsz as usize, phdr.p_align as usize)?;
 
                 loader.load_tls(tls_module, fd, phdr.p_offset, phdr.p_filesz)?;
             }

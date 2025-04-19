@@ -44,7 +44,7 @@ pub trait LoaderImpl {
     }
 
     #[cfg(feature = "tls")]
-    fn alloc_tls(&self, tls_size: usize) -> Result<usize, Error> {
+    fn alloc_tls(&self, tls_size: usize, tls_align: usize) -> Result<usize, Error> {
         Err(Error::AllocError)
     }
 
@@ -104,8 +104,8 @@ where
     }
 
     #[cfg(feature = "tls")]
-    fn alloc_tls(&self, tls_size: usize) -> Result<usize, Error> {
-        <P::Target as LoaderImpl>::alloc_tls(self, tls_size)
+    fn alloc_tls(&self, tls_size: usize, tls_align: usize) -> Result<usize, Error> {
+        <P::Target as LoaderImpl>::alloc_tls(self, tls_size, tls_align)
     }
 
     #[cfg(feature = "tls")]
