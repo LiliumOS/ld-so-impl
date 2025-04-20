@@ -39,16 +39,22 @@ pub trait LoaderImpl {
         sl: &mut [u8],
     ) -> Result<(), Error>;
 
+    #[allow(unused_variables)]
     fn write_str(&self, st: &str) -> core::fmt::Result {
         Ok(())
     }
 
+    #[allow(unused_variables)]
+    unsafe fn close_hdl(&self, hdl: *mut c_void) {}
+
     #[cfg(feature = "tls")]
+    #[allow(unused_variables)]
     fn alloc_tls(&self, tls_size: usize, tls_align: usize) -> Result<usize, Error> {
         Err(Error::AllocError)
     }
 
     #[cfg(feature = "tls")]
+    #[allow(unused_variables)]
     fn load_tls(
         &self,
         tls_module: usize,
@@ -60,6 +66,7 @@ pub trait LoaderImpl {
     }
 
     #[cfg(feature = "tls")]
+    #[allow(unused_variables)]
     fn tls_direct_offset(&self, module: usize) -> Result<usize, Error> {
         Err(Error::LoadError)
     }
@@ -101,6 +108,10 @@ where
 
     fn write_str(&self, st: &str) -> core::fmt::Result {
         <P::Target as LoaderImpl>::write_str(self, st)
+    }
+
+    unsafe fn close_hdl(&self, hdl: *mut c_void) {
+        unsafe { <P::Target as LoaderImpl>::close_hdl(self, hdl) }
     }
 
     #[cfg(feature = "tls")]

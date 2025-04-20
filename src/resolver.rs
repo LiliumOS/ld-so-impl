@@ -13,7 +13,9 @@ use crate::{
     elf::{
         DynEntryType, ElfClass, ElfDyn, ElfGnuHashHeader, ElfHeader, ElfPhdr, ElfRela,
         ElfRelocation, ElfSym, ElfSymbol,
-        consts::{PF_R, PF_W, PF_X, PT_DYNAMIC, PT_GNU_STACK, PT_LOAD, PT_TLS, ProgramType},
+        consts::{
+            PF_R, PF_W, PF_X, PT_DYNAMIC, PT_GNU_STACK, PT_LOAD, PT_PHDR, PT_TLS, ProgramType,
+        },
     },
     helpers::{NamePtr, cstr_from_ptr, strlen_impl},
     loader::{Error, LoaderImpl},
@@ -35,6 +37,8 @@ pub struct DynEntry {
     resolver: Option<&'static Resolver>,
     gnu_hash: *const ElfGnuHashHeader,
     pub dyn_section: *const ElfDyn,
+    pub phdrs: Option<NonNull<ElfPhdr>>,
+    pub phdrs_size: usize,
 
     #[cfg(feature = "tls")]
     tls_module: usize,
@@ -187,7 +191,7 @@ impl Resolver {
         if cfg!(feature = "deny-wx") {
             if phdrs.iter().any(|phdr| {
                 (phdr.p_flags & (PF_W | PF_X)) == (PF_W | PF_X)
-                    && ((phdr.p_type == PT_LOAD)/*|| (phdr.p_type == PT_GNU_STACK)*/)
+                    && ((phdr.p_type == PT_LOAD) || (phdr.p_type == PT_GNU_STACK))
             }) {
                 return Err(Error::WritableText);
             }
@@ -207,6 +211,8 @@ impl Resolver {
             }
         }
 
+        let phdrs = phdrs.iter().find(|v| v.p_type == PT_PHDR);
+
         let dyn_addr = addr
             .wrapping_add(dyn_phdr.p_paddr as usize)
             .cast::<ElfDyn>()
@@ -220,7 +226,20 @@ impl Resolver {
 
         let dyn_seg = unsafe { core::slice::from_ptr_range(dyn_addr..end) };
 
-        Ok(unsafe { self.resolve_object(addr, dyn_seg, soname, udata, tls_module) })
+        Ok(unsafe {
+            self.resolve_object(
+                addr,
+                dyn_seg,
+                soname,
+                udata,
+                tls_module,
+                phdrs.map(|v| {
+                    let addr = addr.add(v.p_paddr as usize).cast::<ElfPhdr>();
+                    let len = v.p_memsz as usize / core::mem::size_of::<ElfPhdr>();
+                    core::slice::from_raw_parts(addr, len)
+                }),
+            )
+        })
     }
 
     pub unsafe fn load(
@@ -232,9 +251,13 @@ impl Resolver {
             self.resolve_error(name, Error::Fatal)
         };
 
-        match unsafe { loader.find(name, udata) }
-            .and_then(|fhdl| unsafe { self.load_impl(Some(name), udata, loader, fhdl) })
-        {
+        match unsafe { loader.find(name, udata) }.and_then(|fhdl| {
+            let ret = unsafe { self.load_impl(Some(name), udata, loader, fhdl) };
+            unsafe {
+                loader.close_hdl(fhdl);
+            }
+            ret
+        }) {
             Ok(ent) => ent,
             Err(e) => self.resolve_error(name, e),
         }
@@ -254,6 +277,7 @@ impl Resolver {
         name: Option<&'static CStr>,
         udata: *mut c_void,
         #[allow(unused_variables)] tls_module: usize,
+        phdrs: Option<&'static [ElfPhdr]>,
     ) -> &'static DynEntry {
         use core::fmt::Write as _;
         let mut entry = DynEntry {
@@ -270,6 +294,8 @@ impl Resolver {
             resolver: Some(self),
             gnu_hash: core::ptr::null(),
             dyn_section: dyn_ent.as_ptr(),
+            phdrs: phdrs.map(NonNull::from_ref).map(NonNull::cast::<ElfPhdr>),
+            phdrs_size: phdrs.map(|v| v.len()).unwrap_or(0),
             #[cfg(feature = "tls")]
             tls_module,
         };
