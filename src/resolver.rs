@@ -474,14 +474,14 @@ impl Resolver {
                         && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
                     {
                         // local or protected symbol. We know what the address is
-                        (entry, sym_desc.value() as usize)
+                        (entry, sym_desc.value() as usize + rela.addend() as usize)
                     } else if name == c"" {
-                        (entry, 0)
+                        (entry, rela.addend() as usize)
                     } else {
-                        let Some(val) = self.find_sym_module_offset(name) else {
+                        let Some((entry, off)) = self.find_sym_module_offset(name) else {
                             self.resolve_error(name, Error::SymbolNotFound)
                         };
-                        val
+                        (entry, off + rela.addend() as usize)
                     };
 
                     let module = ent.tls_module;
