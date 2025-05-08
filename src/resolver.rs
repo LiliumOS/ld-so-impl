@@ -15,6 +15,7 @@ use crate::{
         ElfRelocation, ElfSym, ElfSymbol,
         consts::{
             PF_R, PF_W, PF_X, PT_DYNAMIC, PT_GNU_STACK, PT_LOAD, PT_PHDR, PT_TLS, ProgramType,
+            STT_GNU_IFUNC,
         },
     },
     helpers::{NamePtr, cstr_from_ptr, strlen_impl},
@@ -460,7 +461,7 @@ impl Resolver {
                     } else {
                         let name = get_sym_name(entry, sym);
 
-                        let val = self.find_sym(name);
+                        let val = self.find_sym(name, true);
 
                         if val.is_null() && (sym_desc.info() >> 4) != 2 {
                             self.resolve_error(name, Error::SymbolNotFound)
@@ -594,45 +595,60 @@ impl Resolver {
             }
         }
 
-        if resolve_now {
-            let jumprel = unsafe { core::slice::from_raw_parts(entry.plt_rela, entry.plt_relasz) };
+        let jumprel = unsafe { core::slice::from_raw_parts(entry.plt_rela, entry.plt_relasz) };
 
-            for rela in jumprel {
-                match rela.rel_type() {
-                    arch::JUMP_SLOT_RELOC => {
-                        let sym = rela.symbol() as usize;
+        for rela in jumprel {
+            match rela.rel_type() {
+                arch::JUMP_SLOT_RELOC if resolve_now => {
+                    let sym = rela.symbol() as usize;
 
-                        let sym_desc = unsafe { entry.syms.add(sym).read() };
-                        let val = if sym_desc.section() != 0
-                            && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
-                        {
-                            // local or protected symbol. We know what the address is
-                            base.wrapping_add(sym_desc.value() as usize)
-                        } else {
-                            let name = get_sym_name(entry, sym);
+                    let sym_desc = unsafe { entry.syms.add(sym).read() };
+                    let val = if sym_desc.section() != 0
+                        && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
+                    {
+                        // local or protected symbol. We know what the address is
+                        base.wrapping_add(sym_desc.value() as usize)
+                    } else {
+                        let name = get_sym_name(entry, sym);
 
-                            let val = self.find_sym(name);
+                        let val = self.find_sym(name, true);
 
-                            if val.is_null() && (sym_desc.info() >> 4) != 2 {
-                                self.resolve_error(name, Error::SymbolNotFound)
-                            }
-                            val
-                        };
-
-                        let addend = rela.addend() as isize;
-
-                        let offset = rela.at_offset() as usize;
-
-                        let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
-                        unsafe {
-                            slot.write(val.offset(addend));
+                        if val.is_null() && (sym_desc.info() >> 4) != 2 {
+                            self.resolve_error(name, Error::SymbolNotFound)
                         }
+                        val
+                    };
+
+                    let addend = rela.addend() as isize;
+
+                    let offset = rela.at_offset() as usize;
+
+                    let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
+                    unsafe {
+                        slot.write(val.offset(addend));
                     }
-                    x => {
-                        if let Some(mut loader) = self.head.loader {
-                            use core::fmt::Write as _;
-                            let _ = writeln!(loader, "{soname}: Unexpected relocation type {x}");
-                        }
+                }
+                arch::JUMP_SLOT_RELOC => {
+                    let sym = rela.symbol() as usize;
+                    let name = get_sym_name(entry, sym);
+                    let _ = writeln!(
+                        { self },
+                        "Processing lazy JUMP_SLOT relocation against {}",
+                        unsafe { str::from_utf8_unchecked(name.to_bytes()) }
+                    );
+                    let offset = rela.at_offset() as usize;
+
+                    let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
+
+                    let val = unsafe { slot.read().addr() };
+                    unsafe {
+                        slot.write(base.wrapping_add(val));
+                    }
+                }
+                x => {
+                    if let Some(mut loader) = self.head.loader {
+                        use core::fmt::Write as _;
+                        let _ = writeln!(loader, "{soname}: Unexpected relocation type {x}");
                     }
                 }
             }
@@ -750,7 +766,7 @@ impl Resolver {
     }
 
     #[inline]
-    pub fn find_sym_in(&self, name: &CStr, ent: &DynEntry) -> *mut c_void {
+    pub fn find_sym_in(&self, name: &CStr, ent: &DynEntry, process_ifunc: bool) -> *mut c_void {
         use core::fmt::Write as _;
         let sym = self.find_sym_offset_in(name, ent);
 
@@ -758,9 +774,18 @@ impl Resolver {
             core::ptr::null_mut()
         } else {
             let sym = unsafe { ent.syms.add(sym) };
+
             let val = unsafe { (*sym).value() as usize };
 
-            unsafe { ent.base.add(val) }
+            let addr = unsafe { ent.base.add(val) };
+
+            if process_ifunc && (unsafe { (*sym).info() & 0xF } == STT_GNU_IFUNC) {
+                let prototy: unsafe extern "C" fn() -> *mut c_void =
+                    unsafe { core::mem::transmute(addr) };
+                unsafe { prototy() }
+            } else {
+                addr
+            }
         }
     }
 
@@ -777,10 +802,10 @@ impl Resolver {
     }
 
     #[inline]
-    pub fn find_sym(&self, name: &CStr) -> *mut c_void {
+    pub fn find_sym(&self, name: &CStr, process_ifunc: bool) -> *mut c_void {
         let ents = self.live_entries();
         for ent in ents {
-            let addr = self.find_sym_in(name, ent);
+            let addr = self.find_sym_in(name, ent, process_ifunc);
 
             if !addr.is_null() {
                 return addr;
@@ -788,7 +813,7 @@ impl Resolver {
         }
 
         if let Some(delegate) = self.head.delegate {
-            delegate.find_sym(name)
+            delegate.find_sym(name, process_ifunc)
         } else {
             core::ptr::null_mut()
         }

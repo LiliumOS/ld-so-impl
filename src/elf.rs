@@ -843,6 +843,8 @@ pub mod consts {
             DT_HIPROC = 0x7fffffff,
         }
     }
+
+    pub const STT_GNU_IFUNC: u8 = 10;
 }
 
 #[derive(Copy, Clone, Debug)]
