@@ -7,7 +7,8 @@
     macro_metavar_expr,
     slice_from_ptr_range,
     str_from_raw_parts,
-    non_null_from_ref
+    non_null_from_ref,
+    core_intrinsics // Remove
 )]
 #![cfg_attr(feature = "alloc", feature(allocator_api))]
 

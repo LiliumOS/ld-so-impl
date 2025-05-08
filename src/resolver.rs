@@ -434,11 +434,6 @@ impl Resolver {
             }
         }
 
-        if rela.is_null() {
-            return entry;
-        }
-        let rela = unsafe { core::slice::from_raw_parts(rela, rela_count) };
-
         let soname = if let Some(soname) = entry.name {
             unsafe {
                 core::str::from_raw_parts(soname.as_ptr().cast(), strlen_impl(soname.as_ptr()))
@@ -447,208 +442,219 @@ impl Resolver {
             "<unnamed>"
         };
 
-        for rela in rela {
-            match rela.rel_type() {
-                arch::WORD_RELOC | arch::GLOB_DAT_RELOC => {
-                    let sym = rela.symbol() as usize;
+        if !rela.is_null() {
+            let rela = unsafe { core::slice::from_raw_parts(rela, rela_count) };
+            for rela in rela {
+                match rela.rel_type() {
+                    arch::WORD_RELOC | arch::GLOB_DAT_RELOC => {
+                        let sym = rela.symbol() as usize;
 
-                    let sym_desc = unsafe { entry.syms.add(sym).read() };
-                    let val = if sym_desc.section() != 0
-                        && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
-                    {
-                        // local or protected symbol. We know what the address is
-                        base.wrapping_add(sym_desc.value() as usize)
-                    } else {
+                        let sym_desc = unsafe { entry.syms.add(sym).read() };
+                        let val = if sym_desc.section() != 0
+                            && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
+                        {
+                            // local or protected symbol. We know what the address is
+                            base.wrapping_add(sym_desc.value() as usize)
+                        } else {
+                            let name = get_sym_name(entry, sym);
+
+                            let val = self.find_sym(name, true);
+
+                            if val.is_null() && (sym_desc.info() >> 4) != 2 {
+                                self.resolve_error(name, Error::SymbolNotFound)
+                            }
+                            val
+                        };
+
+                        let addend = rela.addend() as isize;
+
+                        let offset = rela.at_offset() as usize;
+
+                        let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
+                        unsafe {
+                            slot.write(val.offset(addend));
+                        }
+                    }
+                    arch::RELATIVE_RELOC => {
+                        let val = base;
+
+                        let addend = rela.addend() as isize;
+
+                        let offset = rela.at_offset() as usize;
+
+                        let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
+                        unsafe {
+                            slot.write(val.offset(addend));
+                        }
+                    }
+                    #[cfg(feature = "tls")]
+                    arch::TPOFF_RELOC => {
+                        let sym = rela.symbol() as usize;
+
+                        let sym_desc = unsafe { entry.syms.add(sym).read() };
                         let name = get_sym_name(entry, sym);
 
-                        let val = self.find_sym(name, true);
+                        let (ent, off): (&DynEntry, usize) = if sym_desc.section() != 0
+                            && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
+                        {
+                            // local or protected symbol. We know what the address is
+                            (entry, sym_desc.value() as usize + rela.addend() as usize)
+                        } else if name == c"" {
+                            (entry, rela.addend() as usize)
+                        } else {
+                            let Some((entry, off)) = self.find_sym_module_offset(name) else {
+                                self.resolve_error(name, Error::SymbolNotFound)
+                            };
+                            (entry, off + rela.addend() as usize)
+                        };
 
-                        if val.is_null() && (sym_desc.info() >> 4) != 2 {
-                            self.resolve_error(name, Error::SymbolNotFound)
+                        let module = ent.tls_module;
+
+                        let Some(loader) = self.head.loader else {
+                            self.resolve_error(name, Error::Fatal)
+                        };
+
+                        let moff = loader
+                            .tls_direct_offset(module)
+                            .unwrap_or_else(|e| self.resolve_error(name, e)); // Errors if we can't do a `TPOFF` reloc 
+
+                        let val = moff + off;
+
+                        let offset = rela.at_offset() as usize;
+
+                        let slot = unsafe { base.add(offset).cast::<usize>() };
+                        unsafe {
+                            slot.write(val);
                         }
-                        val
-                    };
-
-                    let addend = rela.addend() as isize;
-
-                    let offset = rela.at_offset() as usize;
-
-                    let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
-                    unsafe {
-                        slot.write(val.offset(addend));
                     }
-                }
-                arch::RELATIVE_RELOC => {
-                    let val = base;
+                    #[cfg(feature = "tls")]
+                    arch::DTPOFF_RELOC => {
+                        let sym = rela.symbol() as usize;
 
-                    let addend = rela.addend() as isize;
-
-                    let offset = rela.at_offset() as usize;
-
-                    let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
-                    unsafe {
-                        slot.write(val.offset(addend));
-                    }
-                }
-                #[cfg(feature = "tls")]
-                arch::TPOFF_RELOC => {
-                    let sym = rela.symbol() as usize;
-
-                    let sym_desc = unsafe { entry.syms.add(sym).read() };
-                    let name = get_sym_name(entry, sym);
-
-                    let (ent, off): (&DynEntry, usize) = if sym_desc.section() != 0
-                        && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
-                    {
-                        // local or protected symbol. We know what the address is
-                        (entry, sym_desc.value() as usize + rela.addend() as usize)
-                    } else if name == c"" {
-                        (entry, rela.addend() as usize)
-                    } else {
-                        let Some((entry, off)) = self.find_sym_module_offset(name) else {
-                            self.resolve_error(name, Error::SymbolNotFound)
+                        let sym_desc = unsafe { entry.syms.add(sym).read() };
+                        let name = get_sym_name(entry, sym);
+                        let (_, off): (&DynEntry, usize) = if sym_desc.section() != 0
+                            && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
+                        {
+                            // local or protected symbol. We know what the address is
+                            (entry, sym_desc.value() as usize)
+                        } else {
+                            let Some(val) = self.find_sym_module_offset(name) else {
+                                self.resolve_error(name, Error::SymbolNotFound)
+                            };
+                            val
                         };
-                        (entry, off + rela.addend() as usize)
-                    };
 
-                    let module = ent.tls_module;
+                        let val = off;
 
-                    let Some(loader) = self.head.loader else {
-                        self.resolve_error(name, Error::Fatal)
-                    };
+                        let offset = rela.at_offset() as usize;
 
-                    let moff = loader
-                        .tls_direct_offset(module)
-                        .unwrap_or_else(|e| self.resolve_error(name, e)); // Errors if we can't do a `TPOFF` reloc 
-
-                    let val = moff + off;
-
-                    let offset = rela.at_offset() as usize;
-
-                    let slot = unsafe { base.add(offset).cast::<usize>() };
-                    unsafe {
-                        slot.write(val);
+                        let slot = unsafe { base.add(offset).cast::<usize>() };
+                        unsafe {
+                            slot.write(val);
+                        }
                     }
-                }
-                #[cfg(feature = "tls")]
-                arch::DTPOFF_RELOC => {
-                    let sym = rela.symbol() as usize;
-
-                    let sym_desc = unsafe { entry.syms.add(sym).read() };
-                    let name = get_sym_name(entry, sym);
-                    let (_, off): (&DynEntry, usize) = if sym_desc.section() != 0
-                        && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
-                    {
-                        // local or protected symbol. We know what the address is
-                        (entry, sym_desc.value() as usize)
-                    } else {
-                        let Some(val) = self.find_sym_module_offset(name) else {
-                            self.resolve_error(name, Error::SymbolNotFound)
+                    #[cfg(feature = "tls")]
+                    arch::DTPMOD_RELOC => {
+                        let sym = rela.symbol() as usize;
+                        let name = get_sym_name(entry, sym);
+                        let sym_desc = unsafe { entry.syms.add(sym).read() };
+                        let (ent, _): (&DynEntry, usize) = if sym == 0
+                            || (sym_desc.section() != 0
+                                && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0))
+                        {
+                            // local or protected symbol. We know what the address is
+                            (entry, sym_desc.value() as usize)
+                        } else {
+                            let Some(val) = self.find_sym_module_offset(name) else {
+                                self.resolve_error(name, Error::SymbolNotFound)
+                            };
+                            val
                         };
-                        val
-                    };
 
-                    let val = off;
+                        let module = ent.tls_module;
 
-                    let offset = rela.at_offset() as usize;
+                        let val = module;
 
-                    let slot = unsafe { base.add(offset).cast::<usize>() };
-                    unsafe {
-                        slot.write(val);
+                        let offset = rela.at_offset() as usize;
+
+                        let slot = unsafe { base.add(offset).cast::<usize>() };
+                        unsafe {
+                            slot.write(val);
+                        }
                     }
-                }
-                #[cfg(feature = "tls")]
-                arch::DTPMOD_RELOC => {
-                    let sym = rela.symbol() as usize;
-                    let name = get_sym_name(entry, sym);
-                    let sym_desc = unsafe { entry.syms.add(sym).read() };
-                    let (ent, _): (&DynEntry, usize) = if sym == 0
-                        || (sym_desc.section() != 0
-                            && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0))
-                    {
-                        // local or protected symbol. We know what the address is
-                        (entry, sym_desc.value() as usize)
-                    } else {
-                        let Some(val) = self.find_sym_module_offset(name) else {
-                            self.resolve_error(name, Error::SymbolNotFound)
-                        };
-                        val
-                    };
-
-                    let module = ent.tls_module;
-
-                    let val = module;
-
-                    let offset = rela.at_offset() as usize;
-
-                    let slot = unsafe { base.add(offset).cast::<usize>() };
-                    unsafe {
-                        slot.write(val);
-                    }
-                }
-                x => {
-                    if let Some(mut loader) = self.head.loader {
-                        use core::fmt::Write as _;
-                        let _ = writeln!(loader, "{soname}: Unexpected relocation type {x}");
+                    x => {
+                        if let Some(mut loader) = self.head.loader {
+                            use core::fmt::Write as _;
+                            let _ = writeln!(loader, "{soname}: Unexpected relocation type {x}");
+                        }
                     }
                 }
             }
         }
 
-        let jumprel = unsafe { core::slice::from_raw_parts(entry.plt_rela, entry.plt_relasz) };
+        if !entry.plt_rela.is_null() {
+            let jumprel = unsafe { core::slice::from_raw_parts(entry.plt_rela, entry.plt_relasz) };
 
-        for rela in jumprel {
-            match rela.rel_type() {
-                arch::JUMP_SLOT_RELOC if resolve_now => {
-                    let sym = rela.symbol() as usize;
-
-                    let sym_desc = unsafe { entry.syms.add(sym).read() };
-                    let val = if sym_desc.section() != 0
-                        && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
-                    {
-                        // local or protected symbol. We know what the address is
-                        base.wrapping_add(sym_desc.value() as usize)
-                    } else {
+            for rela in jumprel {
+                match rela.rel_type() {
+                    arch::JUMP_SLOT_RELOC if resolve_now => {
+                        let sym = rela.symbol() as usize;
                         let name = get_sym_name(entry, sym);
 
-                        let val = self.find_sym(name, true);
+                        let offset = rela.at_offset() as usize;
 
-                        if val.is_null() && (sym_desc.info() >> 4) != 2 {
-                            self.resolve_error(name, Error::SymbolNotFound)
+                        let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
+                        let _ = writeln!(
+                            { self },
+                            "Processing lazy JUMP_SLOT relocation at {slot:p} ({offset:#x}) against {}",
+                            unsafe { str::from_utf8_unchecked(name.to_bytes()) }
+                        );
+
+                        let sym_desc = unsafe { entry.syms.add(sym).read() };
+                        let val = if sym_desc.section() != 0
+                            && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
+                        {
+                            // local or protected symbol. We know what the address is
+                            base.wrapping_add(sym_desc.value() as usize)
+                        } else {
+                            let val = self.find_sym(name, true);
+
+                            if val.is_null() && (sym_desc.info() >> 4) != 2 {
+                                self.resolve_error(name, Error::SymbolNotFound)
+                            }
+                            val
+                        };
+
+                        let addend = rela.addend() as isize;
+
+                        unsafe {
+                            slot.write(val.offset(addend));
                         }
-                        val
-                    };
-
-                    let addend = rela.addend() as isize;
-
-                    let offset = rela.at_offset() as usize;
-
-                    let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
-                    unsafe {
-                        slot.write(val.offset(addend));
                     }
-                }
-                arch::JUMP_SLOT_RELOC => {
-                    let sym = rela.symbol() as usize;
-                    let name = get_sym_name(entry, sym);
-                    let _ = writeln!(
-                        { self },
-                        "Processing lazy JUMP_SLOT relocation against {}",
-                        unsafe { str::from_utf8_unchecked(name.to_bytes()) }
-                    );
-                    let offset = rela.at_offset() as usize;
+                    arch::JUMP_SLOT_RELOC => {
+                        let sym = rela.symbol() as usize;
+                        let name = get_sym_name(entry, sym);
+                        let offset = rela.at_offset() as usize;
 
-                    let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
+                        let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
 
-                    let val = unsafe { slot.read().addr() };
-                    unsafe {
-                        slot.write(base.wrapping_add(val));
+                        let _ = writeln!(
+                            { self },
+                            "Processing lazy JUMP_SLOT relocation at {slot:p} ({offset:#x}) against {}",
+                            unsafe { str::from_utf8_unchecked(name.to_bytes()) }
+                        );
+
+                        let val = unsafe { slot.read().addr() };
+                        unsafe {
+                            slot.write(base.wrapping_add(val));
+                        }
                     }
-                }
-                x => {
-                    if let Some(mut loader) = self.head.loader {
-                        use core::fmt::Write as _;
-                        let _ = writeln!(loader, "{soname}: Unexpected relocation type {x}");
+                    x => {
+                        if let Some(mut loader) = self.head.loader {
+                            use core::fmt::Write as _;
+                            let _ = writeln!(loader, "{soname}: Unexpected relocation type {x}");
+                        }
                     }
                 }
             }
