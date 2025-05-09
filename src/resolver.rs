@@ -607,7 +607,7 @@ impl Resolver {
                         let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
                         let _ = writeln!(
                             { self },
-                            "Processing lazy JUMP_SLOT relocation at {slot:p} ({offset:#x}) against {}",
+                            "Processing non-lazy JUMP_SLOT relocation at {slot:p} ({offset:#x}) against {}",
                             unsafe { str::from_utf8_unchecked(name.to_bytes()) }
                         );
 
