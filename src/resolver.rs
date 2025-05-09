@@ -612,9 +612,8 @@ impl Resolver {
                         );
 
                         let sym_desc = unsafe { entry.syms.add(sym).read() };
-                        let val = if sym_desc.section() != 0
-                            && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
-                        {
+                        let _ = writeln!({ self }, "SymInfo: {sym_desc:#?}");
+                        let val = if sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0 {
                             // local or protected symbol. We know what the address is
                             base.wrapping_add(sym_desc.value() as usize)
                         } else {
