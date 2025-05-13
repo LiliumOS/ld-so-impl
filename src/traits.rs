@@ -22,7 +22,9 @@ pub trait Numeric:
     + Not<Output = Self>
     + Copy
     + Shl<Output = Self>
+    + Shl<u32, Output = Self>
     + Shr<Output = Self>
+    + Shr<u32, Output = Self>
     + Sized
     + Debug
     + LowerHex

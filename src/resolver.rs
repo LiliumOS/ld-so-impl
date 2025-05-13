@@ -15,7 +15,7 @@ use crate::{
         ElfRelocation, ElfSym, ElfSymbol,
         consts::{
             PF_R, PF_W, PF_X, PT_DYNAMIC, PT_GNU_STACK, PT_LOAD, PT_PHDR, PT_TLS, ProgramType,
-            STT_GNU_IFUNC,
+            STB_WEAK, STT_GNU_IFUNC,
         },
     },
     helpers::{NamePtr, cstr_from_ptr, strlen_impl},
@@ -42,7 +42,7 @@ pub struct DynEntry {
     pub phdrs_size: usize,
 
     #[cfg(feature = "tls")]
-    tls_module: usize,
+    tls_module: isize,
 }
 
 unsafe impl Send for DynEntry {}
@@ -133,11 +133,12 @@ impl Resolver {
         soname: Option<&'static CStr>,
         udata: *mut c_void,
         fhdl: *mut c_void,
+        exec_tls: bool,
     ) -> &'static DynEntry {
         let Some(loader) = self.head.loader else {
             self.resolve_error(soname.unwrap_or(c"<unnamed module>"), Error::Fatal)
         };
-        match unsafe { self.load_impl(soname, udata, loader, fhdl) } {
+        match unsafe { self.load_impl(soname, udata, loader, fhdl, exec_tls) } {
             Ok(e) => e,
             Err(e) => self.resolve_error(soname.unwrap_or(c"<unnamed module>"), e),
         }
@@ -150,6 +151,7 @@ impl Resolver {
         udata: *mut c_void,
         loader: &'static dyn LoaderImpl,
         fd: *mut c_void,
+        exec_tls: bool,
     ) -> Result<&'static DynEntry, Error> {
         use core::fmt::Write as _;
         let mut ehdr: ElfHeader = ElfHeader::zeroed();
@@ -206,7 +208,8 @@ impl Resolver {
 
         if cfg!(feature = "tls") {
             if let Some(phdr) = phdrs.iter().find(|v| v.p_type == PT_TLS) {
-                tls_module = loader.alloc_tls(phdr.p_memsz as usize, phdr.p_align as usize)?;
+                tls_module =
+                    loader.alloc_tls(phdr.p_memsz as usize, phdr.p_align as usize, exec_tls)?;
 
                 loader.load_tls(tls_module, fd, phdr.p_offset, phdr.p_filesz)?;
             }
@@ -247,13 +250,14 @@ impl Resolver {
         &'static self,
         name: &'static CStr,
         udata: *mut c_void,
+        exec_tls: bool,
     ) -> &'static DynEntry {
         let Some(loader) = self.head.loader else {
             self.resolve_error(name, Error::Fatal)
         };
 
         match unsafe { loader.find(name, udata) }.and_then(|fhdl| {
-            let ret = unsafe { self.load_impl(Some(name), udata, loader, fhdl) };
+            let ret = unsafe { self.load_impl(Some(name), udata, loader, fhdl, exec_tls) };
             unsafe {
                 loader.close_hdl(fhdl);
             }
@@ -277,7 +281,7 @@ impl Resolver {
         dyn_ent: &[ElfDyn],
         name: Option<&'static CStr>,
         udata: *mut c_void,
-        #[allow(unused_variables)] tls_module: usize,
+        #[allow(unused_variables)] tls_module: isize,
         phdrs: Option<&'static [ElfPhdr]>,
     ) -> &'static DynEntry {
         use core::fmt::Write as _;
@@ -309,6 +313,7 @@ impl Resolver {
         let mut init = core::ptr::null::<c_void>();
         let mut init_array = core::ptr::null::<*const c_void>();
         let mut init_arraysz = 0;
+        let mut soname_ptr = None;
 
         for ent in dyn_ent {
             match ent.d_tag {
@@ -370,15 +375,6 @@ impl Resolver {
                 DynEntryType::DT_PLTRELSZ => {
                     entry.plt_relasz = ent.d_val as usize / core::mem::size_of::<ElfRela>();
                 }
-                DynEntryType::DT_SONAME => {
-                    if entry.name.is_none() {
-                        let _ = entry.name.insert(unsafe {
-                            NamePtr::new_unchecked(NonNull::new_unchecked(
-                                base.wrapping_add(ent.d_val as usize).cast(),
-                            ))
-                        });
-                    }
-                }
                 DynEntryType::DT_INIT => {
                     init = base.wrapping_add(ent.d_val as usize).cast();
                 }
@@ -388,8 +384,17 @@ impl Resolver {
                 DynEntryType::DT_INIT_ARRAYSZ => {
                     init_arraysz = ent.d_val as usize / core::mem::size_of::<*const c_void>();
                 }
+                DynEntryType::DT_SONAME => {
+                    soname_ptr = Some(ent.d_val as usize);
+                }
                 _ => {}
             }
+        }
+
+        if entry.name.is_none() {
+            entry.name = soname_ptr.map(|v| unsafe {
+                NamePtr::new_unchecked(NonNull::new_unchecked(entry.strtab.add(v).cast_mut()))
+            });
         }
         let i = self
             .head
@@ -429,7 +434,7 @@ impl Resolver {
                 }
 
                 unsafe {
-                    self.load(needed, udata);
+                    self.load(needed, udata, false);
                 }
             }
         }
@@ -458,7 +463,15 @@ impl Resolver {
                         } else {
                             let name = get_sym_name(entry, sym);
 
+                            let _ = write!(
+                                { self },
+                                "Processing non-local GLOB_DAT relocation against {}...",
+                                unsafe { str::from_utf8_unchecked(name.to_bytes()) }
+                            );
+
                             let val = self.find_sym(name, true);
+
+                            let _ = writeln!({ self }, "{val:p}",);
 
                             if val.is_null() && (sym_desc.info() >> 4) != 2 {
                                 self.resolve_error(name, Error::SymbolNotFound)
@@ -518,11 +531,11 @@ impl Resolver {
                             .tls_direct_offset(module)
                             .unwrap_or_else(|e| self.resolve_error(name, e)); // Errors if we can't do a `TPOFF` reloc 
 
-                        let val = moff + off;
+                        let val = moff.wrapping_add_unsigned(off);
 
                         let offset = rela.at_offset() as usize;
 
-                        let slot = unsafe { base.add(offset).cast::<usize>() };
+                        let slot = unsafe { base.add(offset).cast::<isize>() };
                         unsafe {
                             slot.write(val);
                         }
@@ -578,7 +591,7 @@ impl Resolver {
 
                         let offset = rela.at_offset() as usize;
 
-                        let slot = unsafe { base.add(offset).cast::<usize>() };
+                        let slot = unsafe { base.add(offset).cast::<isize>() };
                         unsafe {
                             slot.write(val);
                         }
@@ -683,8 +696,17 @@ impl Resolver {
 
     #[inline]
     pub fn is_loaded(&self, needed: &CStr) -> bool {
+        use core::fmt::Write as _;
+        let _ = writeln!({ self }, "Checking is_loaded({self:p}, {})", unsafe {
+            core::str::from_utf8_unchecked(needed.to_bytes())
+        });
         for ent in self.live_entries() {
             if let Some(name) = ent.name {
+                let name = unsafe { cstr_from_ptr(name.as_ptr()) };
+
+                let _ = writeln!({ self }, "Checking found {}", unsafe {
+                    core::str::from_utf8_unchecked(name.to_bytes())
+                });
                 if unsafe { cstr_from_ptr(name.as_ptr()) } == needed {
                     return true;
                 }
@@ -740,7 +762,7 @@ impl Resolver {
                     }
 
                     if (chain & 1) == 1 {
-                        break 'inner 0;
+                        break 'inner !0;
                     }
                 }
 
@@ -758,6 +780,7 @@ impl Resolver {
 
             while bucket != 0 {
                 let e_name = get_sym_name(ent, bucket as usize);
+                let syment = unsafe { ent.syms.add(bucket as usize).read() };
 
                 if e_name == name {
                     break;
@@ -778,13 +801,17 @@ impl Resolver {
         if sym == !0 {
             core::ptr::null_mut()
         } else {
-            let sym = unsafe { ent.syms.add(sym) };
+            let sym = unsafe { &*ent.syms.add(sym) };
 
-            let val = unsafe { (*sym).value() as usize };
+            let val = unsafe { sym.value() as usize };
+
+            if sym.binding() == STB_WEAK && sym.section() == 0 {
+                return core::ptr::null_mut();
+            }
 
             let addr = unsafe { ent.base.add(val) };
 
-            if process_ifunc && (unsafe { (*sym).info() & 0xF } == STT_GNU_IFUNC) {
+            if process_ifunc && (sym.sym_type() == STT_GNU_IFUNC) {
                 let prototy: unsafe extern "C" fn() -> *mut c_void =
                     unsafe { core::mem::transmute(addr) };
                 unsafe { prototy() }

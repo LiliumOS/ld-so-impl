@@ -49,7 +49,7 @@ pub trait LoaderImpl {
 
     #[cfg(feature = "tls")]
     #[allow(unused_variables)]
-    fn alloc_tls(&self, tls_size: usize, tls_align: usize) -> Result<usize, Error> {
+    fn alloc_tls(&self, tls_size: usize, tls_align: usize, exec_tls: bool) -> Result<isize, Error> {
         Err(Error::AllocError)
     }
 
@@ -57,7 +57,7 @@ pub trait LoaderImpl {
     #[allow(unused_variables)]
     fn load_tls(
         &self,
-        tls_module: usize,
+        tls_module: isize,
         desc: *mut c_void,
         off: ElfOffset,
         sz: ElfSize,
@@ -67,7 +67,7 @@ pub trait LoaderImpl {
 
     #[cfg(feature = "tls")]
     #[allow(unused_variables)]
-    fn tls_direct_offset(&self, module: usize) -> Result<usize, Error> {
+    fn tls_direct_offset(&self, module: isize) -> Result<isize, Error> {
         Err(Error::LoadError)
     }
 }
@@ -115,19 +115,24 @@ where
     }
 
     #[cfg(feature = "tls")]
-    fn alloc_tls(&self, tls_size: usize, tls_align: usize) -> Result<usize, Error> {
-        <P::Target as LoaderImpl>::alloc_tls(self, tls_size, tls_align)
+    fn alloc_tls(&self, tls_size: usize, tls_align: usize, exec_tls: bool) -> Result<isize, Error> {
+        <P::Target as LoaderImpl>::alloc_tls(self, tls_size, tls_align, exec_tls)
     }
 
     #[cfg(feature = "tls")]
     fn load_tls(
         &self,
-        tls_module: usize,
+        tls_module: isize,
         desc: *mut c_void,
         off: ElfOffset,
         sz: ElfSize,
     ) -> Result<(), Error> {
         <P::Target as LoaderImpl>::load_tls(self, tls_module, desc, off, sz)
+    }
+
+    #[cfg(feature = "tls")]
+    fn tls_direct_offset(&self, module: isize) -> Result<isize, Error> {
+        <P::Target as LoaderImpl>::tls_direct_offset(self, module)
     }
 }
 

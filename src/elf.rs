@@ -82,6 +82,15 @@ pub trait ElfSymbol: Sealed {
     fn info(&self) -> ElfByte<Self::Class>;
     fn other(&self) -> ElfByte<Self::Class>;
     fn section(&self) -> ElfSection<Self::Class>;
+    fn sym_type(&self) -> consts::ElfSymbolType {
+        bytemuck::must_cast(self.info().as_usize() as u8 & 0xF)
+    }
+    fn binding(&self) -> consts::ElfSymbolBinding {
+        bytemuck::must_cast(self.info().as_usize() as u8 >> 4)
+    }
+    fn visibility(&self) -> consts::ElfSymbolVisibility {
+        bytemuck::must_cast(self.other().as_usize() as u8 & 0x3)
+    }
 }
 
 pub trait ElfRelocation: Sealed {
@@ -844,7 +853,41 @@ pub mod consts {
         }
     }
 
-    pub const STT_GNU_IFUNC: u8 = 10;
+    fake_enum::fake_enum! {
+        #[repr(u8)]
+        #[derive(Zeroable,Pod)]
+        pub enum ElfSymbolType {
+            STT_NOTYPE = 0,
+            STT_OBJECT = 1,
+            STT_FUNC = 2,
+            STT_SECTION = 3,
+            STT_FILE = 4,
+            STT_COMMON = 5,
+            STT_TLS = 6,
+            STT_GNU_IFUNC = 10,
+        }
+    }
+
+    fake_enum::fake_enum! {
+        #[repr(u8)]
+        #[derive(Zeroable,Pod)]
+        pub enum ElfSymbolBinding {
+            STB_LOCAL = 0,
+            STB_GLOBAL = 1,
+            STB_WEAK = 2,
+        }
+    }
+
+    fake_enum::fake_enum! {
+        #[repr(u8)]
+        #[derive(Zeroable, Pod)]
+        pub enum ElfSymbolVisibility {
+            STV_DEFAULT = 0,
+            STV_INTERNAL = 1,
+            STV_HIDDEN = 2,
+            STV_PROTECTED = 3,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
