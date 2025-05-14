@@ -618,14 +618,8 @@ impl Resolver {
                         let offset = rela.at_offset() as usize;
 
                         let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
-                        let _ = writeln!(
-                            { self },
-                            "Processing non-lazy JUMP_SLOT relocation at {slot:p} ({offset:#x}) against {}",
-                            unsafe { str::from_utf8_unchecked(name.to_bytes()) }
-                        );
 
                         let sym_desc = unsafe { entry.syms.add(sym).read() };
-                        let _ = writeln!({ self }, "SymInfo: {sym_desc:#?}");
                         let val = if sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0 {
                             // local or protected symbol. We know what the address is
                             base.wrapping_add(sym_desc.value() as usize)
@@ -650,12 +644,6 @@ impl Resolver {
                         let offset = rela.at_offset() as usize;
 
                         let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
-
-                        let _ = writeln!(
-                            { self },
-                            "Processing lazy JUMP_SLOT relocation at {slot:p} ({offset:#x}) against {}",
-                            unsafe { str::from_utf8_unchecked(name.to_bytes()) }
-                        );
 
                         let val = unsafe { slot.read().addr() };
                         unsafe {
