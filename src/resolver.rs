@@ -614,13 +614,19 @@ impl Resolver {
                     arch::JUMP_SLOT_RELOC if resolve_now => {
                         let sym = rela.symbol() as usize;
                         let name = get_sym_name(entry, sym);
-
+                        let _ = writeln!(
+                            { self },
+                            "Resolving eager JUMP_SLOT relocation against {}",
+                            unsafe { core::str::from_utf8_unchecked(name.to_bytes()) }
+                        );
                         let offset = rela.at_offset() as usize;
 
                         let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
 
                         let sym_desc = unsafe { entry.syms.add(sym).read() };
-                        let val = if sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0 {
+                        let val = if !sym_desc.section() == 0
+                            && (sym_desc.other() & 3 != 0 || (sym_desc.info() >> 4) == 0)
+                        {
                             // local or protected symbol. We know what the address is
                             base.wrapping_add(sym_desc.value() as usize)
                         } else {
@@ -632,6 +638,12 @@ impl Resolver {
                             val
                         };
 
+                        let _ = writeln!(
+                            { self },
+                            "Resolving eager JUMP_SLOT relocation against {}: {val:p}",
+                            unsafe { core::str::from_utf8_unchecked(name.to_bytes()) }
+                        );
+
                         let addend = rela.addend() as isize;
 
                         unsafe {
@@ -641,6 +653,11 @@ impl Resolver {
                     arch::JUMP_SLOT_RELOC => {
                         let sym = rela.symbol() as usize;
                         let name = get_sym_name(entry, sym);
+                        let _ = writeln!(
+                            { self },
+                            "Resolving lazy JUMP_SLOT relocation against {}",
+                            unsafe { core::str::from_utf8_unchecked(name.to_bytes()) }
+                        );
                         let offset = rela.at_offset() as usize;
 
                         let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
@@ -709,6 +726,7 @@ impl Resolver {
 
     #[inline]
     pub fn find_sym_offset_in(&self, name: &CStr, ent: &DynEntry) -> usize {
+        use core::fmt::Write;
         if let Some(gnu_hash) = unsafe { ent.gnu_hash.as_ref() } {
             let hash = hash::gnu_hash(name);
 
@@ -754,9 +772,20 @@ impl Resolver {
                     }
                 }
 
-                break 'inner 0;
+                break 'inner !0;
             }
         } else {
+            let _ = writeln!(
+                { self },
+                "Lookup up {} in {}",
+                unsafe { core::str::from_utf8_unchecked(name.to_bytes()) },
+                unsafe {
+                    ent.name
+                        .as_deref()
+                        .map(|v| unsafe { core::str::from_utf8_unchecked(v.to_bytes()) })
+                        .unwrap_or("<unnamed module>")
+                }
+            );
             let nbuckets = unsafe { ent.hash.read() };
             let nchain = unsafe { ent.hash.add(1).read() };
             let buckets = unsafe { ent.hash.add(2) };
@@ -766,15 +795,26 @@ impl Resolver {
 
             let mut bucket = unsafe { buckets.add(hash as usize).read() };
 
-            while bucket != 0 {
+            loop {
                 let e_name = get_sym_name(ent, bucket as usize);
-                let syment = unsafe { ent.syms.add(bucket as usize).read() };
+                let sym = unsafe { ent.syms.add(bucket as usize).read() };
+                let _ = writeln!(
+                    { self },
+                    "Checking symbol in bucket {bucket} has name {}",
+                    unsafe { core::str::from_utf8_unchecked(e_name.to_bytes()) }
+                );
 
                 if e_name == name {
+                    if sym.section() == 0 {
+                        return !0;
+                    }
                     break;
                 }
 
                 bucket = unsafe { chain.add(bucket as usize).read() };
+                if bucket == 0 {
+                    return !0;
+                }
             }
 
             bucket as usize
