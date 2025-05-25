@@ -1,8 +1,9 @@
 use core::{
-    cell::SyncUnsafeCell,
+    cell::{Cell, SyncUnsafeCell},
     ffi::{CStr, c_char, c_void},
     mem::offset_of,
     ptr::NonNull,
+    str::FromStr,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -18,7 +19,7 @@ use crate::{
             STB_WEAK, STT_GNU_IFUNC,
         },
     },
-    helpers::{NamePtr, cstr_from_ptr, strlen_impl},
+    helpers::{CStrExt, NamePtr, cstr_from_ptr, strlen_impl},
     loader::{Error, LoaderImpl},
     safe_addr_of,
 };
@@ -48,6 +49,46 @@ pub struct DynEntry {
 unsafe impl Send for DynEntry {}
 unsafe impl Sync for DynEntry {}
 
+bitflags::bitflags! {
+    #[derive(bytemuck::Pod, Zeroable, Copy, Clone)]
+    #[repr(transparent)]
+    pub struct ResolverDebug : u32 {
+        const LOADING = 0x0000_0001;
+        const DYNAMIC = 0x0000_0002;
+        const RELOCATIONS = 0x0000_0004;
+        const SYMBOLS = 0x0000_0008;
+        const HASH_LOOKUP = 0x0000_0010;
+        const LIB_SEARCH = 0x0000_0020;
+    }
+}
+
+#[derive(Debug)]
+pub struct ResolverDebugFromStrError;
+
+impl FromStr for ResolverDebug {
+    type Err = ResolverDebugFromStrError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut val = ResolverDebug::empty();
+        for v in s.split(',').map(str::trim_ascii) {
+            let v = v.trim();
+            match v {
+                "loading" => val |= ResolverDebug::LOADING,
+                "dynamic" => val |= ResolverDebug::DYNAMIC,
+                "relocation" => val |= ResolverDebug::RELOCATIONS,
+                "symbols" => val |= ResolverDebug::SYMBOLS,
+                "hash" => val |= ResolverDebug::HASH_LOOKUP,
+                "libs" => val |= ResolverDebug::LIB_SEARCH,
+                "1" | "true" | "yes" | "on" | "all" => val |= ResolverDebug::all(),
+                "0" | "false" | "no" | "off" | "none" => val |= ResolverDebug::empty(),
+                _ => return Err(ResolverDebugFromStrError),
+            }
+        }
+
+        Ok(val)
+    }
+}
+
 #[cfg_attr(target_pointer_width = "64", repr(C, align(128)))]
 #[cfg_attr(target_pointer_width = "32", repr(C, align(64)))]
 struct ResolverHead {
@@ -56,8 +97,11 @@ struct ResolverHead {
     cb_resolve_err: Option<fn(&CStr, Error) -> !>,
     loader: Option<&'static (dyn LoaderImpl + Sync)>,
     delegate: Option<&'static Resolver>,
-    force_resolve_now: bool,
+    force_resolve_now: Cell<bool>,
+    debug: Cell<ResolverDebug>,
 }
+
+unsafe impl Sync for ResolverHead {}
 
 const STATIC_RESOLVER_ENTRY_COUNT: usize =
     (4096 - core::mem::size_of::<ResolverHead>()) / core::mem::size_of::<DynEntry>();
@@ -74,6 +118,19 @@ impl core::fmt::Debug for Resolver {
     }
 }
 
+#[macro_export]
+macro_rules! debug_resolver {
+    ($flag:expr, $this:expr, $($tt:tt)+) => {
+        {
+            let mut __this: &$crate::resolver::Resolver = &$this;
+            if __this.test_debug_flags($flag) {
+                use ::core::fmt::Write;
+                let _ = ::core::writeln!(&mut __this, $($tt)*);
+            }
+        }
+    }
+}
+
 pub struct ResolveError {}
 
 impl Resolver {
@@ -84,13 +141,22 @@ impl Resolver {
             cb_resolve_err: None,
             loader: None,
             delegate: None,
-            force_resolve_now: false,
+            force_resolve_now: Cell::new(false),
+            debug: Cell::new(bytemuck::zeroed()),
         },
         static_entries: SyncUnsafeCell::new(bytemuck::zeroed()),
     };
 
-    pub fn force_resolve_now(&mut self) {
-        self.head.force_resolve_now = true;
+    pub unsafe fn force_resolve_now(&self) {
+        self.head.force_resolve_now.set(true);
+    }
+
+    pub unsafe fn set_debug(&self, debug: ResolverDebug) {
+        self.head.debug.set(debug);
+    }
+
+    fn test_debug_flags(&self, debug: ResolverDebug) -> bool {
+        self.head.debug.get().contains(debug)
     }
 
     #[inline(always)]
@@ -308,7 +374,7 @@ impl Resolver {
         let mut rela = core::ptr::null::<ElfRela>();
         let mut rela_count = 0;
 
-        let mut resolve_now = self.head.force_resolve_now;
+        let mut resolve_now = self.head.force_resolve_now.get();
 
         let mut init = core::ptr::null::<c_void>();
         let mut init_array = core::ptr::null::<*const c_void>();
@@ -316,6 +382,9 @@ impl Resolver {
         let mut soname_ptr = None;
 
         for ent in dyn_ent {
+            if self.test_debug_flags(ResolverDebug::DYNAMIC) {
+                debug_resolver!(ResolverDebug::DYNAMIC, self, "Reading Dynamic Tag {ent:?}");
+            }
             match ent.d_tag {
                 DynEntryType::DT_SYMTAB => {
                     entry.syms = base.wrapping_add(ent.d_val as usize).cast();
@@ -463,15 +532,21 @@ impl Resolver {
                         } else {
                             let name = get_sym_name(entry, sym);
 
-                            let _ = write!(
-                                { self },
+                            debug_resolver!(
+                                ResolverDebug::RELOCATIONS,
+                                self,
                                 "Processing non-local GLOB_DAT relocation against {}...",
-                                unsafe { str::from_utf8_unchecked(name.to_bytes()) }
+                                unsafe { name.to_str_unchecked() }
                             );
 
                             let val = self.find_sym(name, true);
 
-                            let _ = writeln!({ self }, "{val:p}",);
+                            debug_resolver!(
+                                ResolverDebug::RELOCATIONS,
+                                self,
+                                "Found {}: {val:p}",
+                                unsafe { name.to_str_unchecked() }
+                            );
 
                             if val.is_null() && (sym_desc.info() >> 4) != 2 {
                                 self.resolve_error(name, Error::SymbolNotFound)
@@ -614,10 +689,11 @@ impl Resolver {
                     arch::JUMP_SLOT_RELOC if resolve_now => {
                         let sym = rela.symbol() as usize;
                         let name = get_sym_name(entry, sym);
-                        let _ = writeln!(
-                            { self },
+                        debug_resolver!(
+                            ResolverDebug::RELOCATIONS,
+                            self,
                             "Resolving eager JUMP_SLOT relocation against {}",
-                            unsafe { core::str::from_utf8_unchecked(name.to_bytes()) }
+                            unsafe { name.to_str_unchecked() }
                         );
                         let offset = rela.at_offset() as usize;
 
@@ -638,10 +714,11 @@ impl Resolver {
                             val
                         };
 
-                        let _ = writeln!(
-                            { self },
+                        debug_resolver!(
+                            ResolverDebug::RELOCATIONS,
+                            self,
                             "Resolving eager JUMP_SLOT relocation against {}: {val:p}",
-                            unsafe { core::str::from_utf8_unchecked(name.to_bytes()) }
+                            unsafe { name.to_str_unchecked() }
                         );
 
                         let addend = rela.addend() as isize;
@@ -653,18 +730,26 @@ impl Resolver {
                     arch::JUMP_SLOT_RELOC => {
                         let sym = rela.symbol() as usize;
                         let name = get_sym_name(entry, sym);
-                        let _ = writeln!(
-                            { self },
+                        debug_resolver!(
+                            ResolverDebug::RELOCATIONS,
+                            self,
                             "Resolving lazy JUMP_SLOT relocation against {}",
-                            unsafe { core::str::from_utf8_unchecked(name.to_bytes()) }
+                            unsafe { name.to_str_unchecked() }
                         );
                         let offset = rela.at_offset() as usize;
 
                         let slot = unsafe { base.add(offset).cast::<*mut c_void>() };
 
-                        let val = unsafe { slot.read().addr() };
+                        let val = unsafe { base.wrapping_add(slot.read().addr()) };
+
+                        debug_resolver!(
+                            ResolverDebug::RELOCATIONS,
+                            self,
+                            "Resolving lazy JUMP_SLOT relocation against {}: {val:p}",
+                            unsafe { name.to_str_unchecked() }
+                        );
                         unsafe {
-                            slot.write(base.wrapping_add(val));
+                            slot.write(val);
                         }
                     }
                     x => {
@@ -702,15 +787,18 @@ impl Resolver {
     #[inline]
     pub fn is_loaded(&self, needed: &CStr) -> bool {
         use core::fmt::Write as _;
-        let _ = writeln!({ self }, "Checking is_loaded({self:p}, {})", unsafe {
-            core::str::from_utf8_unchecked(needed.to_bytes())
-        });
+        debug_resolver!(
+            ResolverDebug::LIB_SEARCH,
+            self,
+            "Checking is_loaded({})",
+            unsafe { needed.to_str_unchecked() }
+        );
         for ent in self.live_entries() {
             if let Some(name) = ent.name {
                 let name = unsafe { cstr_from_ptr(name.as_ptr()) };
 
-                let _ = writeln!({ self }, "Checking found {}", unsafe {
-                    core::str::from_utf8_unchecked(name.to_bytes())
+                debug_resolver!(ResolverDebug::LIB_SEARCH, self, "Found {}", unsafe {
+                    name.to_str_unchecked()
                 });
                 if unsafe { cstr_from_ptr(name.as_ptr()) } == needed {
                     return true;
@@ -728,6 +816,16 @@ impl Resolver {
     pub fn find_sym_offset_in(&self, name: &CStr, ent: &DynEntry) -> usize {
         use core::fmt::Write;
         if let Some(gnu_hash) = unsafe { ent.gnu_hash.as_ref() } {
+            debug_resolver!(
+                ResolverDebug::HASH_LOOKUP,
+                self,
+                "Searching for symbol {} in GNU_HASH library {}",
+                unsafe { name.to_str_unchecked() },
+                ent.name
+                    .as_deref()
+                    .map(|v| unsafe { v.to_str_unchecked() })
+                    .unwrap_or("<unnamed>")
+            );
             let hash = hash::gnu_hash(name);
 
             let bloom_ent = (hash / usize::BITS) % (gnu_hash.bloom_size);
@@ -775,16 +873,15 @@ impl Resolver {
                 break 'inner !0;
             }
         } else {
-            let _ = writeln!(
-                { self },
-                "Lookup up {} in {}",
-                unsafe { core::str::from_utf8_unchecked(name.to_bytes()) },
-                unsafe {
-                    ent.name
-                        .as_deref()
-                        .map(|v| unsafe { core::str::from_utf8_unchecked(v.to_bytes()) })
-                        .unwrap_or("<unnamed module>")
-                }
+            debug_resolver!(
+                ResolverDebug::HASH_LOOKUP,
+                self,
+                "Searching for symbol {} in SYSV_HASH library {}",
+                unsafe { name.to_str_unchecked() },
+                ent.name
+                    .as_deref()
+                    .map(|v| unsafe { v.to_str_unchecked() })
+                    .unwrap_or("<unnamed>")
             );
             let nbuckets = unsafe { ent.hash.read() };
             let nchain = unsafe { ent.hash.add(1).read() };
@@ -831,7 +928,7 @@ impl Resolver {
         } else {
             let sym = unsafe { &*ent.syms.add(sym) };
 
-            let val = unsafe { sym.value() as usize };
+            let val = sym.value() as usize;
 
             if sym.binding() == STB_WEAK && sym.section() == 0 {
                 return core::ptr::null_mut();

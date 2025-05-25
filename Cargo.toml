@@ -7,6 +7,7 @@ edition = "2024"
 bytemuck = { version = "1.21.0", features = ["latest_stable_rust", "derive"] }
 fake-enum = "0.1.4"
 cfg-match = "0.2.1"
+bitflags = { version = "2.9.1", features = ["bytemuck"] }
 
 [lib]
 crate-type = ["rlib"]

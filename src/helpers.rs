@@ -2,6 +2,16 @@ use core::ffi::{CStr, c_char};
 
 use bytemuck::{PodInOption, ZeroableInOption};
 
+pub trait CStrExt {
+    unsafe fn to_str_unchecked(&self) -> &str;
+}
+
+impl CStrExt for CStr {
+    unsafe fn to_str_unchecked(&self) -> &str {
+        unsafe { core::str::from_utf8_unchecked(self.to_bytes()) }
+    }
+}
+
 #[unsafe(export_name = "strlen")]
 pub unsafe extern "C" fn strlen_impl(p: *const c_char) -> usize {
     let mut len = 0;

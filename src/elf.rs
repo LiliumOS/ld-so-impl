@@ -1051,7 +1051,7 @@ impl<Class: ElfClass> core::fmt::Debug for ElfSectionHeader<Class> {
 unsafe impl<Class: ElfClass> Zeroable for ElfSectionHeader<Class> {}
 unsafe impl<Class: ElfClass + 'static> Pod for ElfSectionHeader<Class> {}
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 #[repr(C)]
 pub struct ElfDyn<Class: ElfClass = ElfHost> {
     pub d_tag: Class::DynEntryType,
