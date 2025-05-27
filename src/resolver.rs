@@ -4,7 +4,7 @@ use core::{
     mem::offset_of,
     ptr::NonNull,
     str::FromStr,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
 };
 
 use bytemuck::Zeroable;
@@ -24,8 +24,7 @@ use crate::{
     safe_addr_of,
 };
 
-#[cfg_attr(target_pointer_width = "64", repr(C, align(128)))]
-#[cfg_attr(target_pointer_width = "32", repr(C, align(64)))]
+#[repr(C, align(64))]
 #[derive(Copy, Clone, Zeroable, Debug)]
 pub struct DynEntry {
     got: *mut *const c_void,
@@ -99,12 +98,32 @@ struct ResolverHead {
     delegate: Option<&'static Resolver>,
     force_resolve_now: Cell<bool>,
     debug: Cell<ResolverDebug>,
+    curr_head: AtomicPtr<Resolver>,
+    next: AtomicPtr<Resolver>,
 }
 
 unsafe impl Sync for ResolverHead {}
 
 const STATIC_RESOLVER_ENTRY_COUNT: usize =
-    (4096 - core::mem::size_of::<ResolverHead>()) / core::mem::size_of::<DynEntry>();
+    (8192 - core::mem::size_of::<ResolverHead>()) / core::mem::size_of::<DynEntry>();
+
+pub struct LiveEntries<'a>(core::slice::Iter<'a, DynEntry>, Option<&'a Resolver>);
+
+impl<'a> Iterator for LiveEntries<'a> {
+    type Item = &'a DynEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(it) = self.0.next() {
+            return Some(it);
+        }
+
+        let Some(next) = self.1 else {
+            return None;
+        };
+        *self = next.live_entries();
+        self.next()
+    }
+}
 
 #[repr(C, align(4096))]
 pub struct Resolver {
@@ -143,6 +162,8 @@ impl Resolver {
             delegate: None,
             force_resolve_now: Cell::new(false),
             debug: Cell::new(bytemuck::zeroed()),
+            curr_head: AtomicPtr::new(core::ptr::null_mut()),
+            next: AtomicPtr::new(core::ptr::null_mut()),
         },
         static_entries: SyncUnsafeCell::new(bytemuck::zeroed()),
     };
@@ -187,11 +208,16 @@ impl Resolver {
     }
 
     #[inline(always)]
-    pub fn live_entries(&self) -> &[DynEntry] {
-        let mut count = self.head.entry_count.load(Ordering::Acquire);
+    pub fn live_entries(&self) -> LiveEntries {
+        let count = self.head.entry_count.load(Ordering::Acquire);
         let entries = self.static_entries.get().as_mut_ptr();
 
-        unsafe { core::slice::from_raw_parts(entries, count) }
+        unsafe {
+            LiveEntries(
+                core::slice::from_raw_parts(entries, count).iter(),
+                self.head.next.load(Ordering::Acquire).as_ref(),
+            )
+        }
     }
 
     pub unsafe fn load_from_handle(
@@ -465,15 +491,32 @@ impl Resolver {
                 NamePtr::new_unchecked(NonNull::new_unchecked(entry.strtab.add(v).cast_mut()))
             });
         }
-        let i = self
-            .head
-            .entry_count
-            .fetch_add(0x00010001, Ordering::Relaxed)
-            & 0xFFFF;
+
+        let mut entry_list = unsafe {
+            self.head
+                .curr_head
+                .load(Ordering::Acquire)
+                .as_ref()
+                .unwrap_or(self)
+        };
+
+        let soname = entry.name.as_deref().unwrap_or(c"<unnamed>");
+
+        let mut i = entry_list.head.entry_count.fetch_add(1, Ordering::Relaxed);
         if i > STATIC_RESOLVER_ENTRY_COUNT {
-            panic!("Max Open Objects reached {i}");
+            let Some(loader) = self.head.loader else {
+                self.resolve_error(soname, Error::Fatal)
+            };
+            let next = match loader.allocate_next() {
+                Ok(next) => next,
+                Err(e) => self.resolve_error(soname, e),
+            };
+            self.head.curr_head.store(next, Ordering::Release);
+            entry_list.head.next.store(next, Ordering::Release);
+            entry_list = unsafe { &*next };
+            i = 0;
         }
-        let ptr = unsafe { self.static_entries.get().cast::<DynEntry>().add(i) };
+        let ptr = unsafe { entry_list.static_entries.get().cast::<DynEntry>().add(i) };
 
         if !entry.got.is_null() {
             unsafe { entry.got.add(1).write(ptr.cast()) }
@@ -489,10 +532,6 @@ impl Resolver {
         }
 
         let entry = unsafe { &*ptr };
-
-        self.head
-            .entry_count
-            .fetch_sub(0x00010000, Ordering::Release);
 
         for ent in dyn_ent {
             if ent.d_tag == DynEntryType::DT_NEEDED {
@@ -987,7 +1026,7 @@ impl core::fmt::Write for &Resolver {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<Resolver>() == 4096);
+const _: () = assert!(core::mem::size_of::<Resolver>() == 8192);
 
 #[inline(always)]
 pub fn get_sym_name(ent: &DynEntry, n: usize) -> &CStr {

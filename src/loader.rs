@@ -17,6 +17,7 @@ pub enum Error {
     AllocError,
     Fatal,
     WritableText,
+    NoMemory,
 }
 
 pub trait LoaderImpl {
@@ -38,6 +39,10 @@ pub trait LoaderImpl {
         map_desc: *mut c_void,
         sl: &mut [u8],
     ) -> Result<(), Error>;
+
+    fn allocate_next(&self) -> Result<*mut Resolver, Error> {
+        Err(Error::NoMemory)
+    }
 
     #[allow(unused_variables)]
     fn write_str(&self, st: &str) -> core::fmt::Result {
@@ -104,6 +109,10 @@ where
         sl: &mut [u8],
     ) -> Result<(), Error> {
         <P::Target as LoaderImpl>::read_offset(self, off, map_desc, sl)
+    }
+
+    fn allocate_next(&self) -> Result<*mut Resolver, Error> {
+        <P::Target as LoaderImpl>::allocate_next(self)
     }
 
     fn write_str(&self, st: &str) -> core::fmt::Result {
