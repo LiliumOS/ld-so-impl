@@ -9,6 +9,10 @@ use core::{
 
 use bytemuck::Zeroable;
 
+#[cfg(feature)]
+use crate::lddebug::RDebug;
+#[cfg(feature = "debug")]
+use crate::lddebug::{LinkMap, RDebug};
 use crate::{
     arch::crash_unrecoverably,
     elf::{
@@ -43,6 +47,8 @@ pub struct DynEntry {
 
     #[cfg(feature = "tls")]
     tls_module: isize,
+    #[cfg(feature = "debug")]
+    debug_node: *mut LinkMap,
 }
 
 unsafe impl Send for DynEntry {}
@@ -100,6 +106,10 @@ struct ResolverHead {
     debug: Cell<ResolverDebug>,
     curr_head: AtomicPtr<Resolver>,
     next: AtomicPtr<Resolver>,
+    #[cfg(feature = "debug")]
+    r_debug: RDebug,
+    #[cfg(feature = "debug")]
+    end_node: *mut LinkMap,
 }
 
 unsafe impl Sync for ResolverHead {}
@@ -164,6 +174,8 @@ impl Resolver {
             debug: Cell::new(bytemuck::zeroed()),
             curr_head: AtomicPtr::new(core::ptr::null_mut()),
             next: AtomicPtr::new(core::ptr::null_mut()),
+            r_debug: bytemuck::zeroed(),
+            end_node: core::ptr::null_mut(),
         },
         static_entries: SyncUnsafeCell::new(bytemuck::zeroed()),
     };
@@ -395,6 +407,8 @@ impl Resolver {
             phdrs_size: phdrs.map(|v| v.len()).unwrap_or(0),
             #[cfg(feature = "tls")]
             tls_module,
+            #[cfg(feature = "debug")]
+            debug_node: core::ptr::null_mut(),
         };
 
         let mut rela = core::ptr::null::<ElfRela>();
@@ -721,7 +735,8 @@ impl Resolver {
         }
 
         if !entry.plt_rela.is_null() {
-            let jumprel = unsafe { core::slice::from_raw_parts(entry.plt_rela, entry.plt_relasz) };
+            let jumprel: &[ElfRela] =
+                unsafe { core::slice::from_raw_parts(entry.plt_rela, entry.plt_relasz) };
 
             for rela in jumprel {
                 match rela.rel_type() {

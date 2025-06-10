@@ -1,5 +1,7 @@
 use core::ffi::{CStr, c_void};
 
+#[cfg(feature = "debug")]
+use crate::lddebug::LinkMap;
 use crate::{
     elf::{ElfAddr, ElfOffset, ElfPhdr, ElfSize},
     resolver::Resolver,
@@ -75,6 +77,11 @@ pub trait LoaderImpl {
     fn tls_direct_offset(&self, module: isize) -> Result<isize, Error> {
         Err(Error::LoadError)
     }
+
+    #[cfg(feature = "debug")]
+    fn alloc_link_node(&self) -> *mut LinkMap {
+        core::ptr::null_mut()
+    }
 }
 
 impl<P: core::ops::Deref> LoaderImpl for P
@@ -142,6 +149,11 @@ where
     #[cfg(feature = "tls")]
     fn tls_direct_offset(&self, module: isize) -> Result<isize, Error> {
         <P::Target as LoaderImpl>::tls_direct_offset(self, module)
+    }
+
+    #[cfg(feature = "debug")]
+    fn alloc_link_node(&self) -> *mut LinkMap {
+        <P::Target as LoaderImpl>::alloc_link_node(self)
     }
 }
 

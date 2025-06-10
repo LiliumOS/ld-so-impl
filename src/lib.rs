@@ -16,6 +16,10 @@
 extern crate alloc;
 
 mod debug;
+
+#[cfg(feature = "debug")]
+pub mod lddebug;
+
 pub mod elf;
 pub mod traits;
 
