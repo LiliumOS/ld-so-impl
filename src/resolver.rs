@@ -174,7 +174,9 @@ impl Resolver {
             debug: Cell::new(bytemuck::zeroed()),
             curr_head: AtomicPtr::new(core::ptr::null_mut()),
             next: AtomicPtr::new(core::ptr::null_mut()),
+            #[cfg(feature = "debug")]
             r_debug: bytemuck::zeroed(),
+            #[cfg(feature = "debug")]
             end_node: core::ptr::null_mut(),
         },
         static_entries: SyncUnsafeCell::new(bytemuck::zeroed()),
