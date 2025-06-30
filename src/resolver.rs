@@ -312,7 +312,7 @@ impl Resolver {
 
         let mut tls_module = !0;
 
-        let phdrs = phdrs.iter().find(|v| v.p_type == PT_PHDR);
+        let pt_phdrs = phdrs.iter().find(|v| v.p_type == PT_PHDR);
 
         let dyn_addr = addr
             .wrapping_add(dyn_phdr.p_paddr as usize)
@@ -334,7 +334,7 @@ impl Resolver {
                 soname,
                 udata,
                 tls_module,
-                phdrs.map(|v| {
+                pt_phdrs.map(|v| {
                     let addr = addr.add(v.p_paddr as usize).cast::<ElfPhdr>();
                     let len = v.p_memsz as usize / core::mem::size_of::<ElfPhdr>();
                     core::slice::from_raw_parts(addr, len)
