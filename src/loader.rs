@@ -62,11 +62,10 @@ pub trait LoaderImpl {
 
     #[cfg(feature = "tls")]
     #[allow(unused_variables)]
-    fn load_tls(
+    unsafe fn load_tls(
         &self,
         tls_module: isize,
-        desc: *mut c_void,
-        off: ElfOffset,
+        laddr: *mut c_void,
         sz: ElfSize,
     ) -> Result<(), Error> {
         Err(Error::LoadError)
@@ -136,14 +135,13 @@ where
     }
 
     #[cfg(feature = "tls")]
-    fn load_tls(
+    unsafe fn load_tls(
         &self,
         tls_module: isize,
-        desc: *mut c_void,
-        off: ElfOffset,
+        laddr: *mut c_void,
         sz: ElfSize,
     ) -> Result<(), Error> {
-        <P::Target as LoaderImpl>::load_tls(self, tls_module, desc, off, sz)
+        unsafe { <P::Target as LoaderImpl>::load_tls(self, tls_module, laddr, sz) }
     }
 
     #[cfg(feature = "tls")]

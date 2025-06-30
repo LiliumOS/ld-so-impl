@@ -312,15 +312,6 @@ impl Resolver {
 
         let mut tls_module = !0;
 
-        if cfg!(feature = "tls") {
-            if let Some(phdr) = phdrs.iter().find(|v| v.p_type == PT_TLS) {
-                tls_module =
-                    loader.alloc_tls(phdr.p_memsz as usize, phdr.p_align as usize, exec_tls)?;
-
-                loader.load_tls(tls_module, fd, phdr.p_offset, phdr.p_filesz)?;
-            }
-        }
-
         let phdrs = phdrs.iter().find(|v| v.p_type == PT_PHDR);
 
         let dyn_addr = addr
@@ -336,7 +327,7 @@ impl Resolver {
 
         let dyn_seg = unsafe { core::slice::from_ptr_range(dyn_addr..end) };
 
-        Ok(unsafe {
+        let ent = unsafe {
             self.resolve_object(
                 addr,
                 dyn_seg,
@@ -349,7 +340,23 @@ impl Resolver {
                     core::slice::from_raw_parts(addr, len)
                 }),
             )
-        })
+        };
+
+        if cfg!(feature = "tls") {
+            if let Some(phdr) = phdrs.iter().find(|v| v.p_type == PT_TLS) {
+                tls_module =
+                    loader.alloc_tls(phdr.p_memsz as usize, phdr.p_align as usize, exec_tls)?;
+
+                unsafe {
+                    loader.load_tls(
+                        tls_module,
+                        ent.base.add(phdr.p_paddr as usize),
+                        phdr.p_memsz,
+                    )?;
+                }
+            }
+        }
+        Ok(ent)
     }
 
     pub unsafe fn load(
