@@ -312,6 +312,19 @@ impl Resolver {
 
         let mut tls_module = !0;
 
+        let tls_seg = if cfg!(feature = "tls") {
+            phdrs.iter().find(|v| v.p_type == PT_TLS)
+        } else {
+            None
+        };
+
+        if cfg!(feature = "tls") {
+            if let Some(phdr) = tls_seg {
+                tls_module =
+                    loader.alloc_tls(phdr.p_memsz as usize, phdr.p_align as usize, exec_tls)?;
+            }
+        }
+
         let pt_phdrs = phdrs.iter().find(|v| v.p_type == PT_PHDR);
 
         let dyn_addr = addr
@@ -343,10 +356,7 @@ impl Resolver {
         };
 
         if cfg!(feature = "tls") {
-            if let Some(phdr) = phdrs.iter().find(|v| v.p_type == PT_TLS) {
-                tls_module =
-                    loader.alloc_tls(phdr.p_memsz as usize, phdr.p_align as usize, exec_tls)?;
-
+            if let Some(phdr) = tls_seg {
                 unsafe {
                     loader.load_tls(
                         tls_module,
