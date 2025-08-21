@@ -117,7 +117,14 @@ unsafe impl Sync for ResolverHead {}
 const STATIC_RESOLVER_ENTRY_COUNT: usize =
     (8192 - core::mem::size_of::<ResolverHead>()) / core::mem::size_of::<DynEntry>();
 
+#[derive(Clone)]
 pub struct LiveEntries<'a>(core::slice::Iter<'a, DynEntry>, Option<&'a Resolver>);
+
+impl<'a> core::fmt::Debug for LiveEntries<'a> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_list().entries(self.clone()).finish()
+    }
+}
 
 impl<'a> Iterator for LiveEntries<'a> {
     type Item = &'a DynEntry;
@@ -662,9 +669,23 @@ impl Resolver {
                         } else if name == c"" {
                             (entry, rela.addend() as usize)
                         } else {
+                            debug_resolver!(
+                                ResolverDebug::RELOCATIONS,
+                                self,
+                                "Processing non-local TPOFF relocation against {}+{}...",
+                                unsafe { name.to_str_unchecked() },
+                                rela.addend(),
+                            );
                             let Some((entry, off)) = self.find_sym_module_offset(name) else {
                                 self.resolve_error(name, Error::SymbolNotFound)
                             };
+                            debug_resolver!(
+                                ResolverDebug::RELOCATIONS,
+                                self,
+                                "Found {}: {off} in {}",
+                                unsafe { name.to_str_unchecked() },
+                                entry.tls_module,
+                            );
                             (entry, off + rela.addend() as usize)
                         };
 
@@ -887,6 +908,17 @@ impl Resolver {
 
     #[inline]
     pub fn find_sym_offset_in(&self, name: &CStr, ent: &DynEntry) -> usize {
+        let idx = self.find_sym_index_in(name, ent);
+        if idx == !0 {
+            return !0;
+        }
+
+        let sym = unsafe { ent.syms.add(idx) };
+        unsafe { (*sym).value() as usize }
+    }
+
+    #[inline]
+    pub fn find_sym_index_in(&self, name: &CStr, ent: &DynEntry) -> usize {
         use core::fmt::Write;
         if let Some(gnu_hash) = unsafe { ent.gnu_hash.as_ref() } {
             debug_resolver!(
@@ -994,7 +1026,7 @@ impl Resolver {
     #[inline]
     pub fn find_sym_in(&self, name: &CStr, ent: &DynEntry, process_ifunc: bool) -> *mut c_void {
         use core::fmt::Write as _;
-        let sym = self.find_sym_offset_in(name, ent);
+        let sym = self.find_sym_index_in(name, ent);
 
         if sym == !0 {
             core::ptr::null_mut()
