@@ -33,6 +33,8 @@ pub mod resolver;
 
 pub mod arch;
 
+pub mod entry;
+
 unsafe extern "C" {
     unsafe static mut _GLOBAL_OFFSET_TABLE_: [*mut c_void; 3];
     safe static _DYNAMIC: [ElfDyn; 4];
