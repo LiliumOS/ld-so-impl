@@ -393,7 +393,7 @@ impl ElfClass for Elf32 {
     type Versym = u16;
     type ProgramHeader = Elf32Phdr;
 
-    type DynEntryType = consts::DynEntryType64;
+    type DynEntryType = consts::DynEntryType32;
 
     fn new_sym(
         st_name: Self::Word,

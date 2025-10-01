@@ -1,70 +1,63 @@
+#[doc(hidden)]
 #[macro_export]
 #[cfg(target_arch = "x86_64")]
-/// Takes the address of a local symbol
+macro_rules! get_sym_addr_pcrel {
+    ($e:ident => $sym:path) => {
+        #[allow(unused_unsafe)]
+        unsafe { $crate::helpers::_core::arch::asm!("lea {out}, [{SYM}+rip]", out = out(reg) $e, SYM = sym $sym, options(nomem, pure, nostack));}
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+#[cfg(target_arch = "x86")]
+macro_rules! get_sym_addr_pcrel {
+    ($e:ident => $sym:path) => {
+        #[allow(unused_unsafe)]
+        unsafe { $crate::helpers::_core::arch::asm!("call {get_pc_thunk}", "2:", "add eax, {SYM}-2b", out("eax") $e, SYM = sym $sym, get_pc_thunk = sym $crate::arch::__x86_get_pc_thunk, options(nomem, pure)) }
+    };
+}
+
+#[macro_export]
 macro_rules! safe_addr_of {
-    ($p:path) => {
-        {
-            let __r;
+    ($sym:path) => {{
+        let __p;
+        $crate::get_sym_addr_pcrel!(__p => $sym);
 
-            #[allow(unused_unsafe)]
-            unsafe{::core::arch::asm!("lea {r}, [{SYM}+rip]", r= out(reg) __r, SYM = sym $p, options(nostack, nomem, pure));}
-            let __r = if false {
-                &raw const $p
-            } else {
-                __r
-            };
-            #[allow(unused_unsafe)]
-            unsafe{::core::hint::assert_unchecked((!__r.is_null())&&__r.is_aligned());}
-            __r
+        let __p = if false { &raw const $sym } else { __p };
+        #[allow(unused_unsafe)]
+        unsafe {
+            $crate::helpers::_core::hint::assert_unchecked(!__p.is_null() && __p.is_aligned());
         }
-    }
+        __p
+    }};
 }
 
 #[macro_export]
-#[cfg(target_arch = "x86_64")]
-/// Takes the address of a local symbol
 macro_rules! safe_addr_of_mut {
-    ($p:path) => {
-        {
-            let __r;
+    ($sym:path) => {{
+        let __p;
+        $crate::get_sym_addr_pcrel!(__p => $sym);
 
-            #[allow(unused_unsafe)]
-            unsafe{::core::arch::asm!("lea {r}, [{SYM}+rip]", r= out(reg) __r, SYM = sym $p, options(nostack, nomem, pure));}
-            let __r = if false {
-                &raw mut $p
-            } else {
-                __r
-            };
-            #[allow(unused_unsafe)]
-            unsafe{::core::hint::assert_unchecked((!__r.is_null())&&__r.is_aligned());}
-            __r
+        let __p = if false { &raw mut $sym } else { __p };
+        #[allow(unused_unsafe)]
+        unsafe {
+            $crate::helpers::_core::hint::assert_unchecked(!__p.is_null() && __p.is_aligned());
         }
-    }
+        __p
+    }};
 }
 
-#[macro_export]
-#[cfg(target_arch = "x86_64")]
-macro_rules! safe_call {
-    ($(unsafe $(@ $_tt:tt)?)? fn $p:path {$($params:expr),* $(,)?}) => {
-        {
-            let __r: *const ();
-            #[allow(unused_unsafe)]
-            unsafe{::core::arch::asm!("lea {r}, [{SYM}+rip]", r= out(reg) __r, SYM = sym $p, options(nostack, nomem, pure));}
-
-            let fntpr: $(unsafe $(@ $_tt)?)? extern "C" fn ($(${ignore($params)} _),*) -> _ = if false {
-                $p
-            } else {
-                #[allow(unused_unsafe)]
-                unsafe{::core::mem::transmute(__r)}
-            };
-            fntpr($($params),*)
-        }
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 #[inline(always)]
 #[cold]
 pub fn crash_unrecoverably() -> ! {
     unsafe { core::arch::asm!("ud2", options(noreturn)) }
+}
+
+#[cfg(target_arch = "x86")]
+#[doc(hidden)]
+#[unsafe(naked)]
+pub extern "C" fn __x86_get_pc_thunk() -> *mut core::ffi::c_void {
+    core::arch::naked_asm!("lea eax, [esp]", "ret")
 }

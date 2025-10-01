@@ -1110,6 +1110,7 @@ pub fn get_sym_name(ent: &DynEntry, n: usize) -> &CStr {
 }
 
 #[cfg_attr(target_arch = "x86_64", path = "resolver/x86_64.rs")]
+#[cfg_attr(target_arch = "x86", path = "resolver/x86.rs")]
 mod arch;
 
 pub mod hash;

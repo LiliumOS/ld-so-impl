@@ -23,7 +23,7 @@ pub unsafe extern "C" fn strlen_impl(p: *const c_char) -> usize {
 
 #[inline(always)]
 pub unsafe fn cstr_from_ptr<'a>(p: *const c_char) -> &'a CStr {
-    let len = unsafe { crate::safe_call!(unsafe fn strlen_impl { p }) };
+    let len = unsafe { strlen_impl(p) };
 
     unsafe { CStr::from_bytes_with_nul_unchecked(core::slice::from_raw_parts(p.cast(), len + 1)) }
 }
@@ -69,3 +69,6 @@ impl core::fmt::Debug for NamePtr {
         str.fmt(f)
     }
 }
+
+#[doc(hidden)]
+pub use core as _core;

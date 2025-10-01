@@ -33,6 +33,7 @@ pub mod resolver;
 
 pub mod arch;
 
+#[cfg(feature = "entry")]
 pub mod entry;
 
 unsafe extern "C" {
