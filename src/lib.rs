@@ -6,8 +6,7 @@
     cstr_bytes,
     macro_metavar_expr,
     slice_from_ptr_range,
-    str_from_raw_parts,
-    core_intrinsics // Remove
+    str_from_raw_parts
 )]
 #![cfg_attr(feature = "alloc", feature(allocator_api))]
 
